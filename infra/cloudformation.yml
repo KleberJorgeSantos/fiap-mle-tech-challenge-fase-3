@@ -1,0 +1,361 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Triage API (FIAP MLET Tech Challenge 3) - low-cost cloud stack: ECR, S3 model store,
+  GitHub Actions OIDC role, one EC2 running docker compose (nginx + API + Prometheus + Grafana),
+  start/stop schedule and a budget alert. Delete the stack to stop all costs.
+
+Parameters:
+  GitHubRepository:
+    Type: String
+    Description: GitHub repository allowed to deploy, as owner/name (e.g. KleberJorgeSantos/fiap-mle-tech-challenge-fase-3)
+    AllowedPattern: "[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"
+  CreateGitHubOidcProvider:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Use "false" if the account already has the token.actions.githubusercontent.com OIDC provider
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.micro, t3.small, t3.medium]
+    Description: t3.small (2 GB) is comfortable for nginx + API + Prometheus + Grafana
+  AllowedHttpCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: Who can reach port 80 (use your IP/32 to keep the demo private)
+  EnableSchedule:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Start/stop the instance automatically (saves ~70% of the EC2 cost)
+  StartCron:
+    Type: String
+    Default: cron(0 8 ? * MON-FRI *)
+    Description: When to start the instance (EventBridge Scheduler, America/Sao_Paulo)
+  StopCron:
+    Type: String
+    Default: cron(0 20 * * ? *)
+    Description: When to stop the instance (every day, America/Sao_Paulo)
+  BudgetEmail:
+    Type: String
+    Default: ""
+    Description: E-mail for the monthly budget alert (empty = no budget)
+  MonthlyBudgetUsd:
+    Type: Number
+    Default: 10
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Conditions:
+  CreateOidc: !Equals [!Ref CreateGitHubOidcProvider, "true"]
+  ScheduleOn: !Equals [!Ref EnableSchedule, "true"]
+  BudgetOn: !Not [!Equals [!Ref BudgetEmail, ""]]
+
+Resources:
+  # ── Registry and storage ─────────────────────────────────────────────────────
+  ApiRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: triage-api
+      EmptyOnDelete: true
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules": [{"rulePriority": 1, "description": "Keep only the 5 most recent images",
+            "selection": {"tagStatus": "any", "countType": "imageCountMoreThan", "countNumber": 5},
+            "action": {"type": "expire"}}]}
+
+  # models/<version>/ and models/champion/ (written by Airflow), deploy/<sha>/ (written by the CD)
+  ModelsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-deploy-bundles
+            Status: Enabled
+            Prefix: deploy/
+            ExpirationInDays: 30
+          - Id: expire-noncurrent-versions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+
+  # ── GitHub Actions (OIDC: no long-lived AWS keys in the repository) ──────────
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateOidc
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+        - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
+
+  GitHubActionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Assumed by the CD workflow to push images and deploy to EC2
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - CreateOidc
+                - !Ref GitHubOidcProvider
+                - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubRepository}:*
+      Policies:
+        - PolicyName: triage-cd
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: EcrLogin
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: EcrPush
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:BatchGetImage
+                  - ecr:CompleteLayerUpload
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                Resource: !GetAtt ApiRepository.Arn
+              - Sid: ModelsAndBundles
+                Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:ListBucket]
+                Resource:
+                  - !GetAtt ModelsBucket.Arn
+                  - !Sub ${ModelsBucket.Arn}/*
+              - Sid: StartInstanceIfStopped
+                Effect: Allow
+                Action: ec2:StartInstances
+                Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${AppInstance}
+              - Sid: Describe
+                Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceStatus
+                  - ssm:DescribeInstanceInformation
+                  - ssm:GetCommandInvocation
+                Resource: "*"
+              - Sid: DeployViaSsm
+                Effect: Allow
+                Action: ssm:SendCommand
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${AppInstance}
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}::document/AWS-RunShellScript
+
+  # Attach to YOUR IAM user so the local Airflow can publish approved models to S3.
+  ModelPublisherPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Lets the local Airflow DAG upload approved models to the models bucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: [s3:PutObject, s3:GetObject, s3:ListBucket]
+            Resource:
+              - !GetAtt ModelsBucket.Arn
+              - !Sub ${ModelsBucket.Arn}/models/*
+
+  # ── EC2 running the serving stack ─────────────────────────────────────────────
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # SSM agent (Run Command / Session Manager): deploy and shell without opening port 22
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+        # Pull images from ECR with the instance role (no registry password on disk)
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+      Policies:
+        - PolicyName: read-deploy-bundles
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:ListBucket]
+                Resource:
+                  - !GetAtt ModelsBucket.Arn
+                  - !Sub ${ModelsBucket.Arn}/deploy/*
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Triage API - HTTP only (no SSH; shell access through SSM Session Manager)
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref AllowedHttpCidr
+          Description: nginx
+
+  AppInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroupIds: [!GetAtt AppSecurityGroup.GroupId]
+      MetadataOptions:
+        HttpTokens: required # IMDSv2 only
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: triage-api
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          set -euxo pipefail
+          dnf install -y docker
+          systemctl enable --now docker
+          # Docker Compose v2 plugin (not packaged in Amazon Linux 2023)
+          mkdir -p /usr/local/lib/docker/cli-plugins
+          curl -fsSL "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64" \
+            -o /usr/local/lib/docker/cli-plugins/docker-compose
+          chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+          # 2 GB swap: headroom for image pulls on small instances
+          fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+          echo "/swapfile swap swap defaults 0 0" >> /etc/fstab
+          mkdir -p /opt/triage
+
+  # ── Cost controls ─────────────────────────────────────────────────────────────
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Condition: ScheduleOn
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: start-stop-instance
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [ec2:StartInstances, ec2:StopInstances]
+                Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${AppInstance}
+
+  StartSchedule:
+    Type: AWS::Scheduler::Schedule
+    Condition: ScheduleOn
+    Properties:
+      Description: Start the triage EC2 instance
+      ScheduleExpression: !Ref StartCron
+      ScheduleExpressionTimezone: America/Sao_Paulo
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: arn:aws:scheduler:::aws-sdk:ec2:startInstances
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: !Sub '{"InstanceIds": ["${AppInstance}"]}'
+
+  StopSchedule:
+    Type: AWS::Scheduler::Schedule
+    Condition: ScheduleOn
+    Properties:
+      Description: Stop the triage EC2 instance
+      ScheduleExpression: !Ref StopCron
+      ScheduleExpressionTimezone: America/Sao_Paulo
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Target:
+        Arn: arn:aws:scheduler:::aws-sdk:ec2:stopInstances
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: !Sub '{"InstanceIds": ["${AppInstance}"]}'
+
+  MonthlyBudget:
+    Type: AWS::Budgets::Budget
+    Condition: BudgetOn
+    Properties:
+      Budget:
+        BudgetName: triage-api-monthly
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetUsd
+          Unit: USD
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref BudgetEmail
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref BudgetEmail
+
+Outputs:
+  AwsRegion:
+    Description: GitHub variable AWS_REGION
+    Value: !Ref AWS::Region
+  GitHubActionsRoleArn:
+    Description: GitHub variable AWS_ROLE_ARN
+    Value: !GetAtt GitHubActionsRole.Arn
+  EcrRepositoryUri:
+    Description: GitHub variable ECR_REPOSITORY
+    Value: !GetAtt ApiRepository.RepositoryUri
+  ModelsBucketName:
+    Description: GitHub variable MODELS_BUCKET (also MODELS_BUCKET in orchestration/.env)
+    Value: !Ref ModelsBucket
+  InstanceId:
+    Description: GitHub variable EC2_INSTANCE_ID
+    Value: !Ref AppInstance
+  ModelPublisherPolicyArn:
+    Description: Attach to your IAM user so the local Airflow can publish models to S3
+    Value: !Ref ModelPublisherPolicy
+  PublicUrl:
+    Description: Current public URL (changes after a stop/start; the CD prints the current one)
+    Value: !Sub http://${AppInstance.PublicIp}
