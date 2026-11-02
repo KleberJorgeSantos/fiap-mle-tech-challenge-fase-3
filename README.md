@@ -19,7 +19,7 @@ retreino orquestrado, observabilidade e otimização de latência com ONNX Runti
 ![Prometheus](https://img.shields.io/badge/Prometheus-E6522C?style=for-the-badge&logo=prometheus&logoColor=white)
 ![Grafana](https://img.shields.io/badge/Grafana-F46800?style=for-the-badge&logo=grafana&logoColor=white)
 ![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-CI%2FCD-2088FF?style=for-the-badge&logo=githubactions&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-47%20passed%20·%2098%25%20cov-success?style=for-the-badge)
+![Tests](https://img.shields.io/badge/tests-56%20passed%20·%2098%25%20cov-success?style=for-the-badge)
 
 </div>
 
@@ -73,7 +73,7 @@ pipeline CI/CD, retreino orquestrado, monitoramento e latência.
 | Throughput HTTP com 8 clientes | 200 → **257 req/s** (**+29%**) |
 | Tamanho do artefato | 3,26 MB → **2,08 MB** |
 | Overhead do nginx (proxy reverso) | ~0,5 ms no p50 |
-| Testes | 47 testes (44 locais + 3 da DAG no CI), cobertura **98%** |
+| Testes | 56 testes (52 locais + 4 da DAG no CI), cobertura **98%** |
 
 Relatórios completos: [`reports/latency.md`](reports/latency.md) (modelo isolado) e
 [`reports/http_latency.md`](reports/http_latency.md) (API fim a fim).
@@ -89,10 +89,13 @@ O projeto separa três planos, como no mercado: **treino** (plataforma de MLOps,
 flowchart LR
     subgraph LOCAL["Plataforma de MLOps · local (orchestration/docker-compose.yml)"]
         subgraph AF["Airflow · retreino semanal"]
-            I[ingest] --> V[validate] --> P[preprocess] --> TR[train] --> E[evaluate<br/>quality gate] --> X[export ONNX<br/>parity check] --> PB[publish] --> TK[track] --> PC[publish_to_cloud] --> RL[reload API]
+            I[ingest] --> V[validate] --> P[preprocess] --> TR[train] --> E[evaluate<br/>quality gate] --> X[export ONNX<br/>parity check] --> CC{champion ×<br/>challenger}
+            CC -- vence --> PB[publish] --> TK[track] --> PC[publish_to_cloud] --> RL[reload API]
+            CC -- perde --> CH[register<br/>challenger]
         end
         ML[(MLflow<br/>tracking + registry<br/>alias champion)]
         TK --> ML
+        CH --> ML
     end
     DS[(Medical Abstracts<br/>GitHub raw)] --> I
 
@@ -544,7 +547,8 @@ DAG [`dags/triage_training_dag.py`](dags/triage_training_dag.py) — `triage_tra
 
 ```
 ingest_data → validate_data → preprocess → train_model → evaluate_model → export_onnx
-            → publish_model → track_experiment → publish_to_cloud → reload_api
+            → compare_with_champion ─┬─ vence → publish_model → track_experiment → publish_to_cloud → reload_api
+                                     └─ perde → register_challenger   (produção não muda)
 ```
 
 | Task | Responsabilidade |
@@ -555,13 +559,17 @@ ingest_data → validate_data → preprocess → train_model → evaluate_model 
 | `train_model` | Treina o pipeline e salva em `data/staging/` |
 | `evaluate_model` | **Quality gate**: falha se macro-F1 < 0,60 |
 | `export_onnx` | Converte para ONNX e falha se a paridade for < 99% |
+| `compare_with_champion` | **Champion × challenger** (`BranchPythonOperator`): compara o candidato com o modelo em produção no mesmo conjunto de teste. Só segue para a publicação se `macro_f1` e `recall_urgente` não piorarem mais que a tolerância (`promotion` no `params.yaml`) |
+| `register_challenger` | Caminho do perdedor: registra o candidato no MLflow com o alias **`challenger`** e o motivo da rejeição; `models/`, S3 e API continuam com o champion |
 | `publish_model` | Grava `metadata.json` (versão, métricas, hash do dataset) e promove para `models/` |
 | `track_experiment` | Registra o run no MLflow e promove a versão a `champion` no Model Registry (não falha o pipeline se o MLflow estiver fora) |
 | `publish_to_cloud` | Envia o modelo para `s3://<bucket>/models/<versão>/` e `models/champion/` e dispara o CD (`repository_dispatch`). Sem `MODELS_BUCKET` configurado, não faz nada; configurado e com erro, **falha** (para não deixar a nuvem com o modelo antigo em silêncio) |
 | `reload_api` | `POST /admin/reload` na API local (não falha se ela estiver fora) |
 
-Um modelo só chega a `models/` (e à nuvem) se passar pelo gate e pela paridade — caso contrário a
-produção continua com o modelo anterior. As tasks são wrappers finos de
+Um modelo só chega a `models/` (e à nuvem) se passar por **três verificações**: o quality gate
+(absoluto: "é bom o suficiente?"), a paridade ONNX ("o otimizado responde igual?") e o champion ×
+challenger (relativo: "é pelo menos tão bom quanto o atual?"). Caso contrário, a produção continua
+com o modelo anterior. As tasks são wrappers finos de
 [`src/pipelines/steps.py`](src/pipelines/steps.py): o mesmo código roda na CLI, no CI e no Airflow.
 
 ```bash
@@ -587,7 +595,7 @@ Cada modelo publicado — pela CLI (`make train`) ou pela DAG — vira um **run 
 | Métricas | Acurácia, macro-F1, F1 por classe, recall de `urgente`, paridade ONNX, tamanho dos artefatos |
 | Tags | Versão do modelo (a mesma do `metadata.json`), hash SHA-256 do dataset, classes |
 | Artefatos | `model.joblib`, `metadata.json` e o **modelo ONNX** (flavor `mlflow.onnx`) |
-| Model Registry | Modelo `triage-classifier`; a versão recém-publicada recebe o alias **`champion`** |
+| Model Registry | Modelo `triage-classifier`: a versão publicada recebe o alias **`champion`**; um candidato que perdeu a comparação recebe **`challenger`** (tag `promotion=rejected` com o motivo) |
 
 Assim é possível comparar os retreinos semanais lado a lado na UI (http://localhost:5000) e saber
 exatamente qual versão está em produção.
@@ -713,7 +721,7 @@ O Airflow lê as variáveis de nuvem de `orchestration/.env` ([exemplo](orchestr
 │   ├── ci.yml                    # CI: lint → test/dag-check → build + smoke test
 │   └── cd.yml                    # CD: champion do S3 → ECR → deploy na EC2 (SSM)
 ├── infra/cloudformation.yml      # infraestrutura AWS como código (ECR, S3, OIDC, EC2, custos)
-├── dags/triage_training_dag.py   # DAG Airflow de retreino (10 tasks)
+├── dags/triage_training_dag.py   # DAG Airflow de retreino (12 tasks, com branch champion × challenger)
 ├── orchestration/                # plataforma de MLOps local: Airflow + MLflow (compose, Dockerfile)
 ├── nginx/nginx.conf              # proxy reverso: /, /grafana/, /prometheus/
 ├── monitoring/
@@ -733,7 +741,7 @@ O Airflow lê as variáveis de nuvem de `orchestration/.env` ([exemplo](orchestr
 │   ├── load_test.py              # carga HTTP fim a fim / tráfego para o Grafana
 │   ├── ec2_deploy.sh             # roda na EC2 (via SSM): pull do ECR + compose up + health check
 │   └── empty_bucket.py           # esvazia o bucket versionado antes de apagar o stack
-├── tests/                        # 47 testes, fixtures offline
+├── tests/                        # 56 testes, fixtures offline
 ├── reports/                      # resultados de latência (md + json)
 ├── docs/                         # model card e prints
 ├── Dockerfile                    # multi-stage (uv), usuário não-root, healthcheck
@@ -749,7 +757,7 @@ O Airflow lê as variáveis de nuvem de `orchestration/.env` ([exemplo](orchestr
 | Requisito | Onde | Status |
 |---|---|---|
 | Pipeline CI/CD (lint → test → build), ≥ 2 automações | [`ci.yml`](.github/workflows/ci.yml) (4 jobs) + [`cd.yml`](.github/workflows/cd.yml) (ECR + deploy na EC2) | ✅ |
-| Script/DAG Airflow de treino (carregamento → treino → salvamento) | [`triage_training_dag.py`](dags/triage_training_dag.py) — 10 tasks com quality gate | ✅ |
+| Script/DAG Airflow de treino (carregamento → treino → salvamento) | [`triage_training_dag.py`](dags/triage_training_dag.py) — quality gate, paridade ONNX e champion × challenger | ✅ |
 | Dockerfile funcional do serviço de inferência | [`Dockerfile`](Dockerfile) — multi-stage, não-root, healthcheck | ✅ |
 | Compose com API + Prometheus + Grafana | [`docker-compose.yml`](docker-compose.yml) | ✅ |
 | Dashboard Grafana com ≥ 3 painéis | 11 painéis provisionados ([JSON](monitoring/grafana/dashboards/triage_api.json)) | ✅ |
