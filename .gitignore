@@ -29,3 +29,6 @@ orchestration/.env
 
 # Course material
 *.pdf
+
+# Personal notes (not versioned)
+docs/video_script.md

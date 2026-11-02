@@ -474,7 +474,7 @@ Hiperparâmetros, mapeamento de rótulos, quality gate e paridade mínima ficam 
 │   └── load_test.py              # carga HTTP fim a fim / tráfego para o Grafana
 ├── tests/                        # 36 testes, fixtures offline
 ├── reports/                      # resultados de latência (md + json)
-├── docs/                         # model card, roteiro do vídeo, prints
+├── docs/                         # model card e prints
 ├── Dockerfile                    # multi-stage (uv), usuário não-root, healthcheck
 ├── docker-compose.yml            # API + Prometheus + Grafana
 ├── params.yaml · pyproject.toml · uv.lock · Makefile
@@ -499,12 +499,10 @@ Hiperparâmetros, mapeamento de rótulos, quality gate e paridade mínima ficam 
 | Bibliotecas: Scikit-Learn, FastAPI, prometheus-client, Airflow | `pyproject.toml`, `orchestration/` | ✅ |
 | Dataset com ≥ 2.000 amostras | 11.227 laudos (Medical Abstracts TC Corpus) | ✅ |
 | Histórico de commits semântico | Conventional Commits (`feat`, `fix`, `perf`, `ci`, `docs`…) | ✅ |
-| Vídeo STAR (≤ 5 min) | [Roteiro](docs/video_script.md) · link abaixo | 🎬 |
+| Vídeo STAR (≤ 5 min) | [Link abaixo](#-vídeo) | 🎬 |
 
 ---
 
 ## 🎬 Vídeo
 
 📺 **[Link do vídeo de demonstração (STAR, 5 min)](#)** — _a ser adicionado_
-
-Roteiro: [`docs/video_script.md`](docs/video_script.md)
