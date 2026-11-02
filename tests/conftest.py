@@ -67,6 +67,7 @@ def trained_artifacts(tmp_path_factory, raw_corpus, params) -> dict:
     )
     return {
         "model_dir": model_dir,
+        "staging_dir": data_dir / "staging",
         "splits": splits,
         "metrics": metrics,
         "parity": parity,

@@ -22,7 +22,8 @@ from src.config import (
 
 logger = logging.getLogger(__name__)
 
-CHAMPION_ALIAS = "champion"
+CHAMPION_ALIAS = "champion"  # version in production
+CHALLENGER_ALIAS = "challenger"  # latest candidate that lost the comparison
 
 
 def _flatten(values: dict[str, Any], prefix: str = "") -> dict[str, Any]:
@@ -64,9 +65,16 @@ def _server_reachable(uri: str) -> bool:
 
 
 def log_training_run(
-    model_dir: Path, metadata: dict[str, Any], tracking_uri: str | None = None
+    model_dir: Path,
+    metadata: dict[str, Any],
+    tracking_uri: str | None = None,
+    alias: str = CHAMPION_ALIAS,
+    extra_tags: dict[str, str] | None = None,
 ) -> str | None:
-    """Log the published model as an MLflow run and promote it to ``champion``.
+    """Log a model as an MLflow run, register it and point ``alias`` to that version.
+
+    ``champion`` marks the published model; ``challenger`` a candidate that was
+    registered for traceability but not published.
 
     Returns:
         The MLflow run id, or ``None`` when tracking is disabled or unavailable.
@@ -93,6 +101,7 @@ def log_training_run(
                 "model_version": version,
                 "dataset_sha256": metadata.get("dataset_sha256") or "unknown",
                 "classes": ",".join(metadata["classes"]),
+                **(extra_tags or {}),
             }
         )
         mlflow.log_params(_flatten(metadata["params"]))
@@ -107,13 +116,13 @@ def log_training_run(
 
     client = MlflowClient()
     client.set_registered_model_alias(
-        settings.mlflow_registered_model, CHAMPION_ALIAS, info.registered_model_version
+        settings.mlflow_registered_model, alias, info.registered_model_version
     )
     logger.info(
         "MLflow run %s logged; %s v%s is now '%s'",
         run.info.run_id,
         settings.mlflow_registered_model,
         info.registered_model_version,
-        CHAMPION_ALIAS,
+        alias,
     )
     return run.info.run_id

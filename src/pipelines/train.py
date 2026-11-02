@@ -13,8 +13,13 @@ from src.pipelines import steps
 logger = logging.getLogger(__name__)
 
 
-def run() -> str:
-    """ingest -> validate -> preprocess -> train -> evaluate -> export ONNX -> publish -> track -> cloud."""
+def run() -> str | None:
+    """ingest -> validate -> preprocess -> train -> evaluate -> export ONNX -> compare
+    -> (publish -> track -> cloud) or (register challenger).
+
+    Returns:
+        The published version, or ``None`` when the challenger lost to the champion.
+    """
     settings = get_settings()
     data_dir = settings.data_dir
     staging_dir = data_dir / "staging"
@@ -25,6 +30,13 @@ def run() -> str:
     model_path = steps.train(splits["train"], staging_dir)
     metrics = steps.evaluate_model(model_path, splits["test"])
     parity = steps.export_onnx(model_path, splits["test"])
+
+    decision = steps.compare_with_champion(metrics, settings.model_dir)
+    if not decision["promote"]:
+        steps.register_challenger(staging_dir, metrics, parity, decision, raw_path)
+        logger.warning("Pipeline finished without publishing: %s", decision["reason"])
+        return None
+
     version = steps.publish_model(staging_dir, settings.model_dir, metrics, parity, raw_path)
     steps.track_experiment(settings.model_dir)
     steps.publish_to_cloud(settings.model_dir)
