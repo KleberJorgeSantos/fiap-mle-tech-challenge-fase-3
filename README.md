@@ -79,10 +79,14 @@ Relatórios completos: [`reports/latency.md`](reports/latency.md) (modelo isolad
 
 ```mermaid
 flowchart LR
-    subgraph CI["GitHub Actions"]
-        L[lint] --> T[test] --> B[train + build + smoke test] --> R[(GHCR)]
+    subgraph CI["GitHub Actions · CI"]
+        L[lint] --> T[test] --> B[train + build + smoke test]
         L --> D[dag-check] --> B
     end
+    subgraph CD["GitHub Actions · CD"]
+        PU[train + build + push] --> R[(GHCR)]
+    end
+    B -- sucesso na main --> PU
 
     subgraph AF["Airflow (retreino semanal)"]
         I[ingest] --> V[validate] --> P[preprocess] --> TR[train] --> E[evaluate<br/>quality gate] --> X[export ONNX<br/>parity check] --> PB[publish] --> RL[reload API]
@@ -108,7 +112,7 @@ flowchart LR
 | Métricas | `prometheus_client` (middleware próprio) | Requisições, latência, erros, inferência, classes |
 | Observabilidade | Prometheus + Grafana provisionados | Dashboard com 11 painéis versionado em JSON |
 | Orquestração | Airflow 2.10 (LocalExecutor) | Retreino com quality gate e publicação |
-| CI/CD | GitHub Actions | lint → test / dag-check → train + build + smoke → push GHCR |
+| CI/CD | GitHub Actions | CI: lint → test / dag-check → train + build + smoke · CD: push GHCR |
 
 ---
 
@@ -385,20 +389,44 @@ O label `endpoint` usa o template da rota (não o path cru) para limitar a cardi
 
 ## 🔁 CI/CD
 
-Workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml), disparado em push/PR para `main`:
+Dois workflows separados: **CI** valida todo push/PR; **CD** só entrega o que o CI aprovou.
 
 ```
-lint ──┬──► test ───────┐
-       └──► dag-check ──┴──► build ──► (main) push GHCR
+CI  (push/PR na main)       lint ──┬──► test ───────┐
+                                   └──► dag-check ──┴──► build + smoke test
+                                                              │ sucesso na main
+CD  (workflow_run / tag v*)                                   ▼
+                            treino ──► build ──► push GHCR ──► verificação da imagem publicada
 ```
+
+**[`ci.yml`](.github/workflows/ci.yml): integração contínua**
 
 | Job | O que faz |
 |---|---|
 | **lint** | `ruff check` + `ruff format --check` em `src`, `tests`, `scripts`, `dags` |
-| **test** | `pytest` com cobertura mínima de 70% (atual: 99%), offline com corpus sintético |
+| **test** | `pytest` com cobertura mínima de 70% (atual: 98%), offline com corpus sintético |
 | **dag-check** | Instala Airflow 2.10.5 (constraints oficiais) e valida a DAG com `DagBag` |
 | **build** | Treina no dataset real (com quality gate + paridade ONNX) → benchmark publicado no *Job Summary* → `docker build` → **smoke test** do container (`/health`, `/predict`, `/metrics`) |
-| **push** (só `main`) | Publica a imagem validada no GitHub Container Registry (`latest` + SHA) |
+
+**[`cd.yml`](.github/workflows/cd.yml): entrega contínua**
+
+| Gatilho | Comportamento |
+|---|---|
+| `workflow_run` do CI na `main` | Roda **apenas se o CI terminou com sucesso**, sobre o mesmo commit testado |
+| Tag `v*` (ex.: `v1.0.0`) | Publica a versão semântica (`1.0.0`, `1.0`) |
+| `workflow_dispatch` | Execução manual |
+
+O job **publish** treina o modelo (quality gate + paridade ONNX), constrói e envia a imagem ao
+GitHub Container Registry com as tags `sha-<commit>`, `latest` e, em releases, a versão semântica.
+Em seguida, **baixa a imagem publicada e repete o smoke test**, garantindo que o artefato no registry funciona.
+
+```bash
+docker run -p 8000:8000 ghcr.io/<usuario>/<repositorio>:latest
+```
+
+> O passo seguinte, o deploy em um ambiente de nuvem (ex.: atualizar o serviço ECS Fargate descrito na
+> [arquitetura](#️-decisão-de-arquitetura-em-nuvem)), exige uma conta e credenciais AWS (OIDC) e não faz
+> parte deste repositório.
 
 ---
 
@@ -456,7 +484,9 @@ Hiperparâmetros, mapeamento de rótulos, quality gate e paridade mínima ficam 
 ## 📁 Estrutura do projeto
 
 ```
-├── .github/workflows/ci.yml      # CI/CD: lint → test/dag-check → build → push
+├── .github/workflows/
+│   ├── ci.yml                    # CI: lint → test/dag-check → build + smoke test
+│   └── cd.yml                    # CD: train → build → push GHCR → verificação
 ├── dags/triage_training_dag.py   # DAG Airflow de retreino
 ├── orchestration/                # Airflow local (Dockerfile + compose + requirements)
 ├── monitoring/
@@ -486,7 +516,7 @@ Hiperparâmetros, mapeamento de rótulos, quality gate e paridade mínima ficam 
 
 | Requisito | Onde | Status |
 |---|---|---|
-| Pipeline CI/CD (lint → test → build), ≥ 2 automações | [`ci.yml`](.github/workflows/ci.yml) — 5 jobs, incluindo push da imagem | ✅ |
+| Pipeline CI/CD (lint → test → build), ≥ 2 automações | [`ci.yml`](.github/workflows/ci.yml) (4 jobs) + [`cd.yml`](.github/workflows/cd.yml) (publicação no GHCR) | ✅ |
 | Script/DAG Airflow de treino (carregamento → treino → salvamento) | [`triage_training_dag.py`](dags/triage_training_dag.py) — 8 tasks com quality gate | ✅ |
 | Dockerfile funcional do serviço de inferência | [`Dockerfile`](Dockerfile) — multi-stage, não-root, healthcheck | ✅ |
 | Compose com API + Prometheus + Grafana | [`docker-compose.yml`](docker-compose.yml) | ✅ |

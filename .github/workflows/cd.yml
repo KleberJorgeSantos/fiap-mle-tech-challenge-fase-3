@@ -1,0 +1,103 @@
+name: CD
+
+# Continuous delivery: publishes the inference image to GitHub Container Registry.
+# Runs only after the CI workflow succeeds on main, on a release tag (v*), or manually.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.11"
+  UV_VERSION: "0.7.12"
+
+jobs:
+  publish:
+    name: Train + build + push to GHCR
+    # workflow_run fires on any CI conclusion: only deliver what CI approved.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Resolve commit
+        id: vars
+        run: |
+          SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "short=${SHA::7}" >> "$GITHUB_OUTPUT"
+
+      # workflow_run runs in the context of the default branch: check out the exact commit CI tested.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.vars.outputs.sha }}
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - run: uv sync --frozen --all-extras
+
+      # Model artifacts are not versioned in git: the release image carries a freshly
+      # trained model that passed the quality gate and the ONNX parity check.
+      - name: Train model
+        run: uv run python -m src.pipelines.train
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=sha-${{ steps.vars.outputs.short }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify published image
+        run: |
+          IMAGE="${{ fromJSON(steps.meta.outputs.json).tags[0] }}"
+          docker pull "$IMAGE"
+          docker run -d --name api -p 8000:8000 "$IMAGE"
+          for i in $(seq 1 30); do curl -sf localhost:8000/health && break; sleep 2; done
+          curl -sf localhost:8000/health | grep '"model_loaded":true'
+          curl -sf -X POST localhost:8000/predict \
+            -H 'Content-Type: application/json' \
+            -d '{"text":"Acute ischemic stroke with cerebral hemorrhage"}' | grep '"label"'
+          docker rm -f api
+          {
+            echo "### Imagem publicada"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo "docker run -p 8000:8000 $IMAGE"
+          } >> "$GITHUB_STEP_SUMMARY"
