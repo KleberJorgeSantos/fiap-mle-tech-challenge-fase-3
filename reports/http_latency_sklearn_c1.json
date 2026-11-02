@@ -1,0 +1,13 @@
+{
+  "backend": "sklearn",
+  "requests": 3000,
+  "status_codes": {
+    "200": 3000
+  },
+  "concurrency": 1,
+  "throughput_rps": 136.9,
+  "mean_ms": 7.135,
+  "p50_ms": 6.857,
+  "p95_ms": 9.87,
+  "p99_ms": 12.798
+}

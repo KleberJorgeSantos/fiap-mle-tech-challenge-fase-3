@@ -1,0 +1,13 @@
+{
+  "backend": "onnx",
+  "requests": 3000,
+  "status_codes": {
+    "200": 3000
+  },
+  "concurrency": 8,
+  "throughput_rps": 256.6,
+  "mean_ms": 27.457,
+  "p50_ms": 26.251,
+  "p95_ms": 41.368,
+  "p99_ms": 54.589
+}
