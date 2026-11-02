@@ -34,7 +34,7 @@ jobs:
       - name: Ruff format check
         run: uv run ruff format --check src tests scripts dags
       - name: CloudFormation lint (infra as code)
-        run: uvx cfn-lint infra/cloudformation.yml
+        run: uv run cfn-lint infra/cloudformation.yml
 
   # ── 2. Unit tests (offline synthetic corpus, coverage gate 70%) ─────────────
   test:

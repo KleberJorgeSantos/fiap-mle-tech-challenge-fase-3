@@ -25,7 +25,7 @@ install:        ## Instala todas as dependências (serving + train + dev)
 lint:           ## Ruff (lint + formatação) e cfn-lint (CloudFormation)
 	$(UV) ruff check src tests scripts dags
 	$(UV) ruff format --check src tests scripts dags
-	uvx cfn-lint infra/cloudformation.yml
+	$(UV) cfn-lint infra/cloudformation.yml
 
 format:         ## Formata o código com Ruff
 	$(UV) ruff check --fix src tests scripts dags
