@@ -1,0 +1,142 @@
+"""Training pipeline steps.
+
+Each step reads and writes files and returns plain paths/dicts, so the same
+functions are used by the CLI (``python -m src.pipelines.train``) and by the
+Airflow DAG (where return values travel between tasks through XCom).
+
+A new model is written to a *staging* folder and only copied to the serving
+``models/`` folder by :func:`publish_model`, after passing the quality gate
+and the ONNX parity check.
+"""
+
+import json
+import logging
+import os
+import shutil
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import joblib
+import pandas as pd
+
+from src.config import (
+    LABELS,
+    METADATA_FILE,
+    ONNX_MODEL_FILE,
+    SKLEARN_MODEL_FILE,
+    TARGET_COLUMN,
+    TEXT_COLUMN,
+    load_params,
+)
+from src.data.preprocessing import file_sha256, map_labels, split_dataset, validate_dataset
+from src.evaluation.metrics import check_quality_gate, evaluate
+from src.models.export_onnx import check_parity, export_to_onnx
+from src.models.train import train_model
+
+logger = logging.getLogger(__name__)
+
+
+def ingest_data(data_dir: Path) -> str:
+    """Download the raw corpus (no-op if already cached)."""
+    from src.data.download import download_dataset
+
+    return str(download_dataset(data_dir / "raw"))
+
+
+def validate_data(raw_path: str, data_dir: Path, params: dict[str, Any] | None = None) -> str:
+    """Map labels, clean texts and enforce the data contract."""
+    params = params or load_params()
+    frame = map_labels(pd.read_csv(raw_path), params)
+    validate_dataset(frame, min_rows=params["data"]["min_rows"])
+    target = data_dir / "processed" / "dataset.csv"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_csv(target, index=False)
+    return str(target)
+
+
+def preprocess(dataset_path: str, data_dir: Path, params: dict[str, Any] | None = None) -> dict:
+    """Stratified train/test split."""
+    params = params or load_params()
+    train, test = split_dataset(
+        pd.read_csv(dataset_path),
+        test_size=params["data"]["test_size"],
+        random_state=params["data"]["random_state"],
+    )
+    out_dir = data_dir / "processed"
+    paths = {"train": str(out_dir / "train.csv"), "test": str(out_dir / "test.csv")}
+    train.to_csv(paths["train"], index=False)
+    test.to_csv(paths["test"], index=False)
+    logger.info("Split: %d train / %d test", len(train), len(test))
+    return paths
+
+
+def train(train_path: str, staging_dir: Path, params: dict[str, Any] | None = None) -> str:
+    """Fit the classifier and save it to the staging folder."""
+    params = params or load_params()
+    pipeline = train_model(pd.read_csv(train_path), params["model"])
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    target = staging_dir / SKLEARN_MODEL_FILE
+    joblib.dump(pipeline, target)
+    return str(target)
+
+
+def evaluate_model(
+    model_path: str, test_path: str, params: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Score the candidate on the test split and apply the quality gate."""
+    params = params or load_params()
+    pipeline = joblib.load(model_path)
+    test = pd.read_csv(test_path)
+    metrics = evaluate(test[TARGET_COLUMN].tolist(), pipeline.predict(test[TEXT_COLUMN].tolist()))
+    check_quality_gate(metrics, params["quality_gate"]["min_macro_f1"])
+    return metrics
+
+
+def export_onnx(
+    model_path: str, test_path: str, params: dict[str, Any] | None = None
+) -> dict[str, float]:
+    """Convert the candidate to ONNX and validate parity against sklearn."""
+    params = params or load_params()
+    pipeline = joblib.load(model_path)
+    onnx_path = export_to_onnx(
+        pipeline, Path(model_path).parent / ONNX_MODEL_FILE, opset=params["onnx"]["opset"]
+    )
+    texts = pd.read_csv(test_path)[TEXT_COLUMN].tolist()
+    return check_parity(pipeline, onnx_path, texts, min_parity=params["onnx"]["min_parity"])
+
+
+def publish_model(
+    staging_dir: Path,
+    model_dir: Path,
+    metrics: dict[str, Any],
+    parity: dict[str, float],
+    raw_path: str | None = None,
+    params: dict[str, Any] | None = None,
+) -> str:
+    """Write metadata and promote the staged artifacts to the serving folder."""
+    params = params or load_params()
+    pipeline = joblib.load(staging_dir / SKLEARN_MODEL_FILE)
+    trained_at = datetime.now(UTC)
+    metadata = {
+        "model_version": trained_at.strftime("%Y%m%d%H%M%S"),
+        "trained_at": trained_at.isoformat(),
+        "classes": [str(c) for c in pipeline.classes_],
+        "labels_order": LABELS,
+        "metrics": metrics,
+        "onnx_parity": parity,
+        "dataset_sha256": file_sha256(Path(raw_path)) if raw_path else None,
+        "params": params["model"],
+    }
+    (staging_dir / METADATA_FILE).write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+
+    model_dir.mkdir(parents=True, exist_ok=True)
+    # Metadata goes last: the API reads it to know which version is on disk.
+    for name in (SKLEARN_MODEL_FILE, ONNX_MODEL_FILE, METADATA_FILE):
+        # Copy to a temp file then rename, so a reader never sees a half-written model.
+        # copyfile (content only): copy2's chmod/utime fail on Windows bind mounts.
+        tmp = model_dir / f".{name}.tmp"
+        shutil.copyfile(staging_dir / name, tmp)
+        os.replace(tmp, model_dir / name)
+    logger.info("Published model %s to %s", metadata["model_version"], model_dir)
+    return metadata["model_version"]
