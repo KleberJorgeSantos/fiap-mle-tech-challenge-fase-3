@@ -1,0 +1,8 @@
+# Training deps installed on top of the Airflow image.
+# scikit-learn MUST match uv.lock: the API unpickles the model trained here.
+scikit-learn==1.5.2
+skl2onnx==1.20.0
+onnx==1.23.2
+onnxruntime==1.31.1
+pydantic-settings==2.16.2
+truststore==0.10.5

@@ -1,0 +1,89 @@
+# ============================================================
+# Local Airflow (LocalExecutor + Postgres) for the retraining DAG
+#
+#   make airflow-up        # or: docker compose -f orchestration/docker-compose.airflow.yml up -d --build
+#   UI: http://localhost:8080  (airflow / airflow)
+#
+# The project root is mounted at /opt/airflow/project, so the DAG reuses the
+# code in src/ and publishes the new model straight into ./models, which the
+# API container also mounts.
+# ============================================================
+
+x-airflow-common: &airflow-common
+  build: .
+  image: triage-airflow:2.10.5
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/project/dags
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "false"
+    AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: 30
+    PYTHONPATH: /opt/airflow/project
+    DATA_DIR: /opt/airflow/project/data
+    MODEL_DIR: /opt/airflow/project/models
+    REPORTS_DIR: /opt/airflow/project/reports
+    # API reloaded after a new model is published (soft-fail if it is not running)
+    TRIAGE_API_URL: http://host.docker.internal:8000
+  volumes:
+    - ..:/opt/airflow/project
+    - ./logs:/opt/airflow/logs
+  user: "${AIRFLOW_UID:-50000}:0"
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  depends_on: &airflow-depends
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 10
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate &&
+        airflow users create --username airflow --password airflow \
+          --firstname Admin --lastname User --role Admin --email admin@example.com || true
+    restart: "no"
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 15s
+      retries: 10
+    depends_on:
+      <<: *airflow-depends
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      <<: *airflow-depends
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  airflow_pg:
