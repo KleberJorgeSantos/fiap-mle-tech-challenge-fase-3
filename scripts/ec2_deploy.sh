@@ -38,14 +38,22 @@ $COMPOSE pull --quiet
 $COMPOSE up -d --remove-orphans
 docker image prune -f >/dev/null
 
-for _ in $(seq 1 30); do
-  if curl -sf http://localhost/health; then
-    echo
-    echo "Deployed $API_IMAGE"
-    exit 0
-  fi
-  sleep 2
-done
-echo "API did not become healthy" >&2
-$COMPOSE logs --tail 50 api >&2
-exit 1
+wait_for() { # url, name
+  for _ in $(seq 1 30); do
+    curl -sf "$1" >/dev/null && return 0
+    sleep 2
+  done
+  echo "$2 did not become healthy" >&2
+  return 1
+}
+
+wait_for http://localhost/health "API" || { $COMPOSE logs --tail 50 api >&2; exit 1; }
+
+# GF_SECURITY_ADMIN_PASSWORD only applies when Grafana creates its database; on an
+# existing volume it is ignored. Re-applying it keeps .grafana_password authoritative.
+wait_for http://localhost/grafana/api/health "Grafana" || { $COMPOSE logs --tail 50 grafana >&2; exit 1; }
+$COMPOSE exec -T grafana grafana cli admin reset-admin-password "$(cat .grafana_password)" >/dev/null
+
+curl -s http://localhost/health
+echo
+echo "Deployed $API_IMAGE"
