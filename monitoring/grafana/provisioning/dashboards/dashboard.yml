@@ -1,0 +1,13 @@
+# Grafana dashboard provider -- loads JSON files from /var/lib/grafana/dashboards
+apiVersion: 1
+
+providers:
+  - name: triage-api
+    orgId: 1
+    folder: "Triage API"
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
