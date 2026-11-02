@@ -19,7 +19,7 @@ retreino orquestrado, observabilidade e otimização de latência com ONNX Runti
 ![Prometheus](https://img.shields.io/badge/Prometheus-E6522C?style=for-the-badge&logo=prometheus&logoColor=white)
 ![Grafana](https://img.shields.io/badge/Grafana-F46800?style=for-the-badge&logo=grafana&logoColor=white)
 ![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-CI%2FCD-2088FF?style=for-the-badge&logo=githubactions&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-41%20passed%20·%2098%25%20cov-success?style=for-the-badge)
+![Tests](https://img.shields.io/badge/tests-47%20passed%20·%2098%25%20cov-success?style=for-the-badge)
 
 </div>
 
@@ -29,7 +29,7 @@ retreino orquestrado, observabilidade e otimização de latência com ONNX Runti
 
 - [🎯 Contexto](#-contexto)
 - [🏆 Resultados](#-resultados)
-- [🏗️ Arquitetura local](#️-arquitetura-local)
+- [🏗️ Arquitetura](#️-arquitetura)
 - [☁️ Decisão de arquitetura em nuvem](#️-decisão-de-arquitetura-em-nuvem)
 - [🚀 Quick Start](#-quick-start)
 - [🧠 Dados e modelo](#-dados-e-modelo)
@@ -39,6 +39,7 @@ retreino orquestrado, observabilidade e otimização de latência com ONNX Runti
 - [🔁 CI/CD](#-cicd)
 - [🌬️ Orquestração com Airflow](#️-orquestração-com-airflow)
 - [🧪 Rastreamento de experimentos (MLflow)](#-rastreamento-de-experimentos-mlflow)
+- [🚀 Deploy na AWS](#-deploy-na-aws)
 - [⚙️ Configuração](#️-configuração)
 - [📁 Estrutura do projeto](#-estrutura-do-projeto)
 - [🎓 Como este projeto atende ao desafio](#-como-este-projeto-atende-ao-desafio)
@@ -72,58 +73,68 @@ pipeline CI/CD, retreino orquestrado, monitoramento e latência.
 | Throughput HTTP com 8 clientes | 200 → **257 req/s** (**+29%**) |
 | Tamanho do artefato | 3,26 MB → **2,08 MB** |
 | Overhead do nginx (proxy reverso) | ~0,5 ms no p50 |
-| Testes | 41 testes (38 locais + 3 da DAG no CI), cobertura **98%** |
+| Testes | 47 testes (44 locais + 3 da DAG no CI), cobertura **98%** |
 
 Relatórios completos: [`reports/latency.md`](reports/latency.md) (modelo isolado) e
 [`reports/http_latency.md`](reports/http_latency.md) (API fim a fim).
 
 ---
 
-## 🏗️ Arquitetura local
+## 🏗️ Arquitetura
+
+O projeto separa três planos, como no mercado: **treino** (plataforma de MLOps, local), **entrega**
+(GitHub Actions) e **serving** (EC2 na AWS, ou a mesma stack localmente).
 
 ```mermaid
 flowchart LR
-    subgraph CI["GitHub Actions · CI"]
-        L[lint] --> T[test] --> B[train + build + smoke test]
-        L --> D[dag-check] --> B
+    subgraph LOCAL["Plataforma de MLOps · local (orchestration/docker-compose.yml)"]
+        subgraph AF["Airflow · retreino semanal"]
+            I[ingest] --> V[validate] --> P[preprocess] --> TR[train] --> E[evaluate<br/>quality gate] --> X[export ONNX<br/>parity check] --> PB[publish] --> TK[track] --> PC[publish_to_cloud] --> RL[reload API]
+        end
+        ML[(MLflow<br/>tracking + registry<br/>alias champion)]
+        TK --> ML
     end
-    subgraph CD["GitHub Actions · CD"]
-        PU[train + build + push] --> R[(GHCR)]
-    end
-    B -- sucesso na main --> PU
-
-    subgraph AF["Airflow (retreino semanal)"]
-        I[ingest] --> V[validate] --> P[preprocess] --> TR[train] --> E[evaluate<br/>quality gate] --> X[export ONNX<br/>parity check] --> PB[publish] --> TK[track<br/>MLflow] --> RL[reload API]
-    end
-
     DS[(Medical Abstracts<br/>GitHub raw)] --> I
-    PB --> M[(models/<br/>model.onnx · model.joblib · metadata.json)]
 
-    subgraph STACK["docker compose"]
-        NG[nginx :80] --> API[FastAPI<br/>ONNX Runtime]
-        NG --> GF[Grafana]
-        NG --> PR[Prometheus]
-        NG --> ML[MLflow<br/>tracking + registry]
-        API -- /metrics --> PR --> GF
+    subgraph GH["GitHub Actions"]
+        CI[CI: lint · test · dag-check<br/>build + smoke test] -- sucesso na main --> CD[CD: build com o champion<br/>→ push → deploy]
     end
 
-    M --> API
-    TK --> ML
-    RL -. POST /admin/reload .-> API
-    U[Sistema do hospital / médico] -- POST /predict --> NG
+    subgraph AWS["AWS (infra/cloudformation.yml)"]
+        S3[(S3<br/>models/champion)]
+        ECR[(ECR)]
+        subgraph EC2["EC2 · docker-compose.prod.yml"]
+            NG[nginx :80] --> API[API ONNX]
+            NG --> GF[Grafana]
+            NG --> PR[Prometheus]
+            API --> PR
+        end
+    end
+
+    PC -- modelo aprovado --> S3
+    PC -. repository_dispatch .-> CD
+    S3 --> CD
+    CD -- OIDC --> ECR
+    CD -- SSM Run Command --> EC2
+    ECR --> API
+    U[Sistema do hospital] -- HTTP --> NG
 ```
+
+Localmente, a mesma stack de serving roda com `docker-compose.yml` (que constrói a imagem e monta
+`models/`), e a task `reload_api` recarrega o modelo novo na API local.
 
 | Componente | Tecnologia | Papel |
 |---|---|---|
 | Modelo | TF-IDF (1–2 gramas) + Regressão Logística | Classificador leve, interpretável e rápido |
 | Otimização | `skl2onnx` + ONNX Runtime | Pipeline inteiro (texto → probabilidades) em um grafo ONNX |
 | Serviço | FastAPI + Uvicorn em Docker (multi-stage, não-root) | Inferência real-time |
-| Proxy reverso | nginx | Porta única (80): roteia `/`, `/grafana/`, `/prometheus/`, `/mlflow/`; bloqueia `/metrics` externamente |
+| Proxy reverso | nginx | Porta única (80): roteia `/`, `/grafana/`, `/prometheus/`; bloqueia `/metrics` externamente |
 | Métricas | `prometheus_client` (middleware próprio) | Requisições, latência, erros, inferência, classes |
 | Observabilidade | Prometheus + Grafana provisionados | Dashboard com 11 painéis versionado em JSON |
 | Orquestração | Airflow 2.10 (LocalExecutor) | Retreino com quality gate e publicação |
 | Experimentos | MLflow 3 (tracking + Model Registry) | Histórico de cada retreino; alias `champion` = modelo em produção |
-| CI/CD | GitHub Actions | CI: lint → test / dag-check → train + build + smoke · CD: push GHCR |
+| CI/CD | GitHub Actions | CI: lint → test / dag-check → build + smoke · CD: champion do S3 → ECR → EC2 (SSM) |
+| Infraestrutura | CloudFormation | ECR, S3, OIDC, EC2, agendamento liga/desliga e alerta de orçamento como código |
 
 ---
 
@@ -150,44 +161,48 @@ custo mínimo, e como ela evoluiria para a produção real de um hospital.
 
 ```mermaid
 flowchart LR
-    U[Usuário / sistema do hospital] -->|HTTP :80| SG{{Security Group<br/>só 80/443 e 22}}
+    U[Usuário / sistema do hospital] -->|HTTP :80| SG{{Security Group<br/>só a porta 80}}
     SG --> NG
-    subgraph EC2["EC2 t3.small · Docker Compose"]
+    subgraph EC2["EC2 t3.small · docker-compose.prod.yml"]
         NG[nginx] --> API[triage-api<br/>ONNX Runtime]
         NG --> GF[Grafana]
         NG --> PR[Prometheus]
-        NG --> ML[MLflow]
         API --> PR
     end
-    GHCR[(GHCR<br/>imagem do CD)] -->|docker compose pull| API
+    ECR[(ECR)] -->|pull com IAM Role| API
+    CD[GitHub Actions CD] -->|push imagem · OIDC| ECR
+    CD -->|SSM Run Command| EC2
+    SCH[EventBridge Scheduler] -.liga 8h / desliga 20h.-> EC2
 ```
 
-É o **mesmo `docker-compose.yml` do ambiente local**, numa única instância — o padrão já validado no
-Tech Challenge 1. O nginx é a única porta de entrada e cumpre, em escala de um servidor, o papel que um
+Uma única instância roda a stack de serving com Docker Compose — o padrão já validado no Tech
+Challenge 1. O nginx é a única porta de entrada e cumpre, em escala de um servidor, o papel que um
 load balancer gerenciado teria:
 
 | Função | Como o nginx resolve |
 |---|---|
-| Porta única | Tudo entra pela 80 (ou 443 com Let's Encrypt); demais portas fechadas no Security Group |
-| Roteamento por caminho | `/` → API · `/grafana/` → Grafana · `/prometheus/` → Prometheus · `/mlflow/` → MLflow |
+| Porta única | Tudo entra pela 80; demais portas ficam só na rede interna do Docker |
+| Roteamento por caminho | `/` → API · `/grafana/` → Grafana · `/prometheus/` → Prometheus |
 | Proteção | `/metrics` bloqueado para a internet; limite de 1 MB por requisição; `server_tokens off` |
 | Desempenho | Conexões *keep-alive* com a API (overhead medido: ~0,5 ms no p50) |
 
-**Por que EC2 aqui:** custo previsível e baixo (uma `t3.small`, ~US$ 15/mês ligada 24h — e pode ser
-desligada fora das demonstrações), nenhum serviço gerenciado cobrando por hora, e reaproveita o
-conhecimento do TC1. O **Airflow não vai para a EC2** (precisa de 2–4 GB de RAM sozinho): o retreino roda
-localmente/sob demanda e o modelo chega à EC2 dentro da imagem publicada pelo CD.
+**Por que EC2 aqui:** custo baixo e previsível (uma `t3.small` ligada só em horário comercial), nenhum
+serviço gerenciado cobrando por hora e reaproveita o conhecimento do TC1. **Airflow e MLflow não vão para
+a EC2:** são a plataforma de treino, pesada e usada só semanalmente; o modelo aprovado chega à nuvem
+pelo S3, dentro da imagem construída pelo CD.
 
-**Deploy:**
+**Decisões que mantêm tudo automatizado e seguro sem custo extra:**
 
-```bash
-# Na EC2 (Amazon Linux 2023 / Ubuntu) com Docker e o plugin compose instalados
-git clone https://github.com/<usuario>/<repositorio>.git && cd <repositorio>
-export PUBLIC_URL=http://<ip-publico-da-ec2> GRAFANA_ADMIN_PASSWORD=<senha-forte>
-uv sync --all-extras && make train   # ou baixe o artefato "model-and-reports" do CI para models/
-docker compose up -d --build
-# Security Group: liberar 80 (e 443) para o mundo e 22 apenas para o seu IP
-```
+| Decisão | Benefício |
+|---|---|
+| **ECR** como registry | A EC2 baixa a imagem com sua IAM Role — nenhuma senha de registry no servidor |
+| **OIDC** GitHub → AWS | Nenhuma chave de acesso da AWS guardada no GitHub |
+| **SSM Run Command** para o deploy | Sem porta 22 aberta e sem chave SSH; acesso ao shell pelo Session Manager |
+| **Modelo dentro da imagem** (tag `sha-<commit>-model-<versão>`) | Imagem imutável: voltar uma versão é trocar a tag |
+| **CloudFormation** ([`infra/cloudformation.yml`](infra/cloudformation.yml)) | Infra versionada; `make infra-down` apaga tudo e zera o custo |
+| **EventBridge Scheduler** + **AWS Budgets** | A EC2 desliga sozinha à noite; alerta por e-mail se passar do orçamento |
+
+O passo a passo está em [🚀 Deploy na AWS](#-deploy-na-aws).
 
 **Limites assumidos (aceitáveis para o projeto, não para o hospital):** um único servidor (sem alta
 disponibilidade — se a instância cair, a API cai), escala apenas vertical e deploy com alguns segundos
@@ -245,8 +260,19 @@ comportamento funcional por uma fração do preço.
 
 ### FinOps
 
-- **Projeto (Camada 1):** uma EC2 `t3.small` desligada quando não está em uso; imagem no GHCR (gratuito);
-  nenhum serviço gerenciado cobrando por hora. Dependendo da conta, os créditos de free tier cobrem o período.
+- **Projeto (Camada 1):** estimativa em us-east-1 (confira na [AWS Pricing Calculator](https://calculator.aws/)):
+
+  | Item | Ligada 24h | Com o agendamento padrão (~60h/semana) |
+  |---|---:|---:|
+  | EC2 `t3.small` | ~US$ 15 | ~US$ 5,40 |
+  | IP público (cobrado só com a instância ligada) | ~US$ 3,60 | ~US$ 1,30 |
+  | EBS 20 GB gp3 (cobrado mesmo desligada) | ~US$ 1,60 | ~US$ 1,60 |
+  | ECR (~1,3 GB; mantém só as 5 últimas imagens) | ~US$ 0,15 | ~US$ 0,15 |
+  | S3, SSM, OIDC, EventBridge, Budgets | ~US$ 0 | ~US$ 0 |
+  | **Total por mês** | **~US$ 20** | **~US$ 8,50** |
+
+  Airflow e MLflow rodam localmente (custo zero) e, dependendo da conta, os créditos de free tier
+  cobrem o período. Após a avaliação, `make infra-down` remove tudo.
 - **Produção (Camada 2):** Fargate com 2 tasks de **0,5 vCPU / 1 GB** atende centenas de req/s (o modelo usa < 1 ms de CPU por laudo).
   Autoscaling mínimo 2 (alta disponibilidade), máximo conforme o pico.
 - **Fargate Spot** para o ambiente de homologação; Savings Plans para produção.
@@ -277,36 +303,37 @@ equivalentes estão no [`Makefile`](Makefile)).
 # 1. Dependências
 uv sync --all-extras
 
-# 2. Stack completa: nginx + API + Prometheus + Grafana + MLflow
-#    (treina antes, se models/ estiver vazio)
-make up                          # = docker compose up -d --build
+# 2. Plataforma de MLOps: Airflow + MLflow
+make mlops-up                    # = docker compose -f orchestration/docker-compose.yml up -d --build
 
 # 3. Treinar (dataset → validação → treino → quality gate → ONNX → publish → MLflow)
 make train                       # = uv run python -m src.pipelines.train
+                                 #   (ou dispare a DAG triage_training_pipeline no Airflow)
 
-# 4. Testes e lint
+# 4. Serving: nginx + API + Prometheus + Grafana
+make up                          # = docker compose up -d --build
+
+# 5. Testes e lint
 make test
 make lint
 
-# 5. Gerar tráfego para ver o dashboard
+# 6. Gerar tráfego para ver o dashboard
 make traffic                     # 5 min de tráfego com 3% de requisições inválidas
 
-# 6. Benchmark de latência sklearn vs ONNX
+# 7. Benchmark de latência sklearn vs ONNX
 make benchmark
 ```
-
-Tudo é servido pelo nginx na porta 80:
 
 | Serviço | URL | Acesso |
 |---|---|---|
 | API (Swagger) | http://localhost/docs | — |
 | Grafana | http://localhost/grafana/ | anônimo (viewer) ou `admin` / `admin` |
 | Prometheus | http://localhost/prometheus/ | — |
-| MLflow | http://localhost/mlflow/ | — |
-| Airflow | http://localhost:8080 | `airflow` / `airflow` (após `make airflow-up`) |
+| MLflow | http://localhost:5000 | — (plataforma de MLOps) |
+| Airflow | http://localhost:8080 | `airflow` / `airflow` (plataforma de MLOps) |
 
-As portas diretas (`8000`, `3000`, `9090`, `5000`) continuam publicadas para depuração local e para o
-treino/Airflow alcançarem o MLflow; na EC2, o Security Group expõe apenas a 80.
+API, Grafana e Prometheus passam pelo nginx (porta 80). As portas diretas (`8000`, `3000`, `9090`)
+continuam publicadas para depuração local; na EC2 só a 80 existe.
 
 > 💡 **Windows/PowerShell:** use `curl.exe` (não o alias `curl`) e prefira `127.0.0.1` a `localhost` —
 > no Windows, `localhost` tenta IPv6 primeiro e adiciona ~40 ms a cada chamada.
@@ -472,44 +499,42 @@ O label `endpoint` usa o template da rota (não o path cru) para limitar a cardi
 
 ## 🔁 CI/CD
 
-Dois workflows separados: **CI** valida todo push/PR; **CD** só entrega o que o CI aprovou.
+Dois workflows separados: **CI** valida todo push/PR; **CD** entrega e implanta só o que foi aprovado.
 
 ```
-CI  (push/PR na main)       lint ──┬──► test ───────┐
-                                   └──► dag-check ──┴──► build + smoke test
-                                                              │ sucesso na main
-CD  (workflow_run / tag v*)                                   ▼
-                            treino ──► build ──► push GHCR ──► verificação da imagem publicada
+CI  (push/PR na main)          lint ──┬──► test ───────┐
+                                      └──► dag-check ──┴──► build + smoke test
+                                                                 │ sucesso na main
+CD  (CI ok · modelo novo do Airflow · tag v* · manual)           ▼
+     build: modelo champion do S3 ──► imagem ──► smoke test ──► push ECR
+     deploy: liga a EC2 se preciso ──► bundle no S3 ──► SSM: compose pull/up ──► smoke test público
 ```
 
 **[`ci.yml`](.github/workflows/ci.yml): integração contínua**
 
 | Job | O que faz |
 |---|---|
-| **lint** | `ruff check` + `ruff format --check` em `src`, `tests`, `scripts`, `dags` |
+| **lint** | `ruff check` + `ruff format --check` em `src`, `tests`, `scripts`, `dags`; `cfn-lint` no template de infraestrutura |
 | **test** | `pytest` com cobertura mínima de 70% (atual: 98%), offline com corpus sintético |
 | **dag-check** | Instala Airflow 2.10.5 (constraints oficiais) e valida a DAG com `DagBag` |
 | **build** | Treina no dataset real (com quality gate + paridade ONNX) → benchmark publicado no *Job Summary* → `docker build` → **smoke test** do container (`/health`, `/predict`, `/metrics`) |
 
-**[`cd.yml`](.github/workflows/cd.yml): entrega contínua**
+**[`cd.yml`](.github/workflows/cd.yml): entrega e deploy contínuos**
 
-| Gatilho | Comportamento |
+| Gatilho | Quando |
 |---|---|
-| `workflow_run` do CI na `main` | Roda **apenas se o CI terminou com sucesso**, sobre o mesmo commit testado |
-| Tag `v*` (ex.: `v1.0.0`) | Publica a versão semântica (`1.0.0`, `1.0`) |
-| `workflow_dispatch` | Execução manual |
+| `workflow_run` do CI na `main` | Mudança de código — roda **apenas se o CI passou**, sobre o mesmo commit testado |
+| `repository_dispatch` `model-published` | O Airflow aprovou e publicou um **modelo novo** no S3 |
+| Tag `v*` / `workflow_dispatch` | Release (`1.0.0`, `1.0`) ou execução manual |
 
-O job **publish** treina o modelo (quality gate + paridade ONNX), constrói e envia a imagem ao
-GitHub Container Registry com as tags `sha-<commit>`, `latest` e, em releases, a versão semântica.
-Em seguida, **baixa a imagem publicada e repete o smoke test**, garantindo que o artefato no registry funciona.
+| Job | O que faz |
+|---|---|
+| **build** | Login na AWS via **OIDC** → baixa o modelo **`champion` do S3** (o aprovado pelo Airflow; se ainda não existir, treina) → constrói a imagem → smoke test → push no **ECR** com as tags `sha-<commit>-model-<versão>`, `sha-<commit>` e `latest` |
+| **deploy** | Liga a EC2 se o agendamento a desligou → envia o *bundle* (compose de produção + nginx + monitoramento) ao S3 → executa [`scripts/ec2_deploy.sh`](scripts/ec2_deploy.sh) na instância via **SSM** → smoke test pela URL pública, publicada no *Job Summary* e no environment `production` |
 
-```bash
-docker run -p 8000:8000 ghcr.io/<usuario>/<repositorio>:latest
-```
-
-> O passo seguinte, o deploy em um ambiente de nuvem (ex.: atualizar o serviço ECS Fargate descrito na
-> [arquitetura](#️-decisão-de-arquitetura-em-nuvem)), exige uma conta e credenciais AWS (OIDC) e não faz
-> parte deste repositório.
+**Sem as variáveis de AWS no repositório**, o CD continua útil: treina, constrói e publica a imagem no
+GitHub Container Registry, e o job de deploy é pulado — o projeto funciona antes e depois de a
+infraestrutura existir.
 
 ---
 
@@ -519,7 +544,7 @@ DAG [`dags/triage_training_dag.py`](dags/triage_training_dag.py) — `triage_tra
 
 ```
 ingest_data → validate_data → preprocess → train_model → evaluate_model → export_onnx
-            → publish_model → track_experiment → reload_api
+            → publish_model → track_experiment → publish_to_cloud → reload_api
 ```
 
 | Task | Responsabilidade |
@@ -532,16 +557,17 @@ ingest_data → validate_data → preprocess → train_model → evaluate_model 
 | `export_onnx` | Converte para ONNX e falha se a paridade for < 99% |
 | `publish_model` | Grava `metadata.json` (versão, métricas, hash do dataset) e promove para `models/` |
 | `track_experiment` | Registra o run no MLflow e promove a versão a `champion` no Model Registry (não falha o pipeline se o MLflow estiver fora) |
-| `reload_api` | `POST /admin/reload` na API em execução (não falha se ela estiver fora) |
+| `publish_to_cloud` | Envia o modelo para `s3://<bucket>/models/<versão>/` e `models/champion/` e dispara o CD (`repository_dispatch`). Sem `MODELS_BUCKET` configurado, não faz nada; configurado e com erro, **falha** (para não deixar a nuvem com o modelo antigo em silêncio) |
+| `reload_api` | `POST /admin/reload` na API local (não falha se ela estiver fora) |
 
-Um modelo só chega a `models/` se passar pelo gate e pela paridade — caso contrário a produção continua
-com o modelo anterior. As tasks são wrappers finos de [`src/pipelines/steps.py`](src/pipelines/steps.py):
-o mesmo código roda na CLI, no CI e no Airflow.
+Um modelo só chega a `models/` (e à nuvem) se passar pelo gate e pela paridade — caso contrário a
+produção continua com o modelo anterior. As tasks são wrappers finos de
+[`src/pipelines/steps.py`](src/pipelines/steps.py): o mesmo código roda na CLI, no CI e no Airflow.
 
 ```bash
-make airflow-up       # http://localhost:8080 · airflow / airflow
+make mlops-up         # Airflow http://localhost:8080 (airflow / airflow) + MLflow http://localhost:5000
 # Disparar: UI → triage_training_pipeline → ▶  ou:
-docker compose -f orchestration/docker-compose.airflow.yml exec airflow-scheduler \
+docker compose -f orchestration/docker-compose.yml exec airflow-scheduler \
   airflow dags trigger triage_training_pipeline
 ```
 
@@ -563,21 +589,96 @@ Cada modelo publicado — pela CLI (`make train`) ou pela DAG — vira um **run 
 | Artefatos | `model.joblib`, `metadata.json` e o **modelo ONNX** (flavor `mlflow.onnx`) |
 | Model Registry | Modelo `triage-classifier`; a versão recém-publicada recebe o alias **`champion`** |
 
-Assim é possível comparar os retreinos semanais lado a lado na UI (http://localhost/mlflow/) e saber
+Assim é possível comparar os retreinos semanais lado a lado na UI (http://localhost:5000) e saber
 exatamente qual versão está em produção.
 
 ![Runs no MLflow (um vindo do Airflow, outro do treino local)](docs/mlflow_runs.png)
 
 **Decisões de desenho:**
 
-- **Servidor MLflow no compose** (backend SQLite + `--serve-artifacts`): treino local e Airflow enviam
-  tudo por HTTP, sem precisar compartilhar disco.
+- **MLflow na plataforma de MLOps, junto do Airflow** (`orchestration/docker-compose.yml`), separado da
+  stack de serving: o Airflow o acessa pelo nome do serviço (`http://mlflow:5000`) e o treino local por
+  `http://127.0.0.1:5000`. Backend SQLite + `--serve-artifacts`: os clientes enviam tudo por HTTP.
+- **No mercado**, o MLflow é uma plataforma compartilhada (Postgres/RDS + S3, ou gerenciado: Databricks,
+  SageMaker MLflow). Aqui ele é local; o modelo aprovado chega à nuvem pelo S3 (`publish_to_cloud`).
 - **A API não depende do MLflow:** ela continua lendo `models/`. O MLflow é a camada de rastreabilidade,
   não um ponto de falha do serving.
 - **Tracking não bloqueia o pipeline:** sem `MLFLOW_TRACKING_URI` ou com o servidor fora do ar, o treino
   registra um aviso e segue (o quality gate e a paridade continuam obrigatórios). O cliente checa o
   `/health` do servidor antes, para não ficar minutos em *retry*.
 - Cliente leve (`mlflow-skinny`) no treino e no Airflow; nenhum MLflow na imagem de inferência.
+
+---
+
+## 🚀 Deploy na AWS
+
+Tudo é criado por código e pode ser apagado com um comando. A arquitetura e os custos estão na
+[Camada 1](#️-decisão-de-arquitetura-em-nuvem).
+
+**Pré-requisitos:** conta AWS, [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
+configurado (`aws configure`) com um usuário que possa criar recursos IAM, e o repositório no GitHub
+(o [`gh`](https://cli.github.com/) facilita o passo 2).
+
+**1. Criar a infraestrutura** (ECR, S3, role OIDC, EC2, agendamento e orçamento):
+
+```bash
+make infra-up GITHUB_REPO=<dono>/<repositorio> BUDGET_EMAIL=<seu-email>
+```
+
+> Se a conta já tiver o provedor OIDC do GitHub (`token.actions.githubusercontent.com`), adicione
+> `CreateGitHubOidcProvider=false` aos parâmetros. Confirme a inscrição no e-mail do AWS Budgets.
+
+**2. Informar o CD** — copie os valores de `make infra-outputs` para as *variables* do repositório
+(não são segredos: o acesso é garantido pela role OIDC, restrita a este repositório):
+
+```bash
+gh variable set AWS_REGION      --body us-east-1
+gh variable set AWS_ROLE_ARN    --body <GitHubActionsRoleArn>
+gh variable set ECR_REPOSITORY  --body <EcrRepositoryUri>
+gh variable set MODELS_BUCKET   --body <ModelsBucketName>
+gh variable set EC2_INSTANCE_ID --body <InstanceId>
+```
+
+**3. Primeiro deploy** — um push na `main` (ou `gh workflow run CD`). Como ainda não há modelo no S3, o CD
+treina, constrói, envia ao ECR e implanta na EC2. A URL pública aparece no *Job Summary* e no
+environment `production` do GitHub:
+
+| Serviço | URL |
+|---|---|
+| API (Swagger) | `http://<ip-publico>/docs` |
+| Grafana | `http://<ip-publico>/grafana/` (visualização anônima) |
+| Prometheus | `http://<ip-publico>/prometheus/` |
+
+**4. Ligar o retreino à nuvem (opcional, fecha o ciclo):**
+
+```bash
+# a) permissão para o Airflow (com as suas credenciais) enviar modelos ao bucket
+aws iam attach-user-policy --user-name <seu-usuario-iam> --policy-arn <ModelPublisherPolicyArn>
+# b) token do GitHub (fine-grained, "Contents: Read and write" neste repositório) para disparar o CD
+# c) preencher orchestration/.env: MODELS_BUCKET, AWS_CONFIG_DIR (ex.: C:/Users/<voce>/.aws),
+#    GITHUB_REPOSITORY e GITHUB_DISPATCH_TOKEN
+make mlops-up
+```
+
+A partir daí, cada execução aprovada da DAG publica o modelo no S3 e dispara o CD, que implanta a nova
+imagem na EC2 — **sem nenhum passo manual**.
+
+**Operação:**
+
+- **Horário:** a instância liga às 8h (seg–sex) e desliga às 20h (horário de Brasília). O CD a liga se
+  precisar fazer um deploy fora do horário. Ajuste em `StartCron` / `StopCron` ou desative com
+  `EnableSchedule=false`. O IP público muda a cada religamento: o CD sempre mostra o atual.
+- **Shell na instância** (sem SSH): console EC2 → *Connect* → *Session Manager*, ou
+  `aws ssm start-session --target <InstanceId>`.
+- **Senha do admin do Grafana:** gerada na instância, em `sudo cat /opt/triage/.grafana_password`.
+- **Rollback:** pela sessão SSM, aponte para uma tag anterior do ECR:
+  `cd /opt/triage && sudo API_IMAGE=<ecr>:<tag-anterior> AWS_REGION=us-east-1 BUNDLE_URI=s3://<bucket>/deploy/<sha>/ bash ec2_deploy.sh`.
+
+**5. Apagar tudo (custo zero):**
+
+```bash
+make infra-down   # esvazia o bucket (todas as versões) e remove o stack inteiro
+```
 
 ---
 
@@ -594,11 +695,14 @@ Variáveis de ambiente ([`.env.example`](.env.example)):
 | `MLFLOW_TRACKING_URI` | — (`make train` usa `http://127.0.0.1:5000`) | Servidor MLflow; vazio desliga o tracking |
 | `MLFLOW_EXPERIMENT` | `triage-nlp` | Experimento no MLflow |
 | `MLFLOW_REGISTERED_MODEL` | `triage-classifier` | Nome no Model Registry |
-| `PUBLIC_URL` | `http://localhost` | URL pública (EC2) usada nos links do Prometheus atrás do nginx |
-| `GRAFANA_ADMIN_PASSWORD` | `admin` | Senha do admin do Grafana (troque na EC2) |
+| `MODELS_BUCKET` | — | Bucket S3 de modelos; vazio deixa o pipeline 100% local |
+| `AWS_REGION` | `us-east-1` | Região do bucket |
+| `GITHUB_REPOSITORY` / `GITHUB_DISPATCH_TOKEN` | — | Repositório (`dono/nome`) e token para disparar o CD |
 | `CA_BUNDLE` | — | Bundle de CA para redes com inspeção TLS |
 
 Hiperparâmetros, mapeamento de rótulos, quality gate e paridade mínima ficam em [`params.yaml`](params.yaml).
+O Airflow lê as variáveis de nuvem de `orchestration/.env` ([exemplo](orchestration/.env.example)); na EC2,
+`PUBLIC_URL` e a senha do Grafana são gerados pelo script de deploy.
 
 ---
 
@@ -607,10 +711,11 @@ Hiperparâmetros, mapeamento de rótulos, quality gate e paridade mínima ficam 
 ```
 ├── .github/workflows/
 │   ├── ci.yml                    # CI: lint → test/dag-check → build + smoke test
-│   └── cd.yml                    # CD: train → build → push GHCR → verificação
-├── dags/triage_training_dag.py   # DAG Airflow de retreino
-├── orchestration/                # Airflow local (Dockerfile + compose + requirements)
-├── nginx/nginx.conf              # proxy reverso: /, /grafana/, /prometheus/, /mlflow/
+│   └── cd.yml                    # CD: champion do S3 → ECR → deploy na EC2 (SSM)
+├── infra/cloudformation.yml      # infraestrutura AWS como código (ECR, S3, OIDC, EC2, custos)
+├── dags/triage_training_dag.py   # DAG Airflow de retreino (10 tasks)
+├── orchestration/                # plataforma de MLOps local: Airflow + MLflow (compose, Dockerfile)
+├── nginx/nginx.conf              # proxy reverso: /, /grafana/, /prometheus/
 ├── monitoring/
 │   ├── prometheus.yml
 │   └── grafana/                  # datasource + provider + dashboard JSON
@@ -621,15 +726,19 @@ Hiperparâmetros, mapeamento de rótulos, quality gate e paridade mínima ficam 
 │   ├── evaluation/metrics.py     # métricas + quality gate
 │   ├── pipelines/                # steps reutilizáveis + CLI de treino
 │   ├── tracking/                 # MLflow: run, artefatos, Model Registry (champion)
+│   ├── deploy/                   # publicação do modelo no S3 + disparo do CD
 │   └── api/                      # FastAPI, schemas, métricas Prometheus
 ├── scripts/
 │   ├── benchmark.py              # latência offline sklearn × ONNX
-│   └── load_test.py              # carga HTTP fim a fim / tráfego para o Grafana
-├── tests/                        # 41 testes, fixtures offline
+│   ├── load_test.py              # carga HTTP fim a fim / tráfego para o Grafana
+│   ├── ec2_deploy.sh             # roda na EC2 (via SSM): pull do ECR + compose up + health check
+│   └── empty_bucket.py           # esvazia o bucket versionado antes de apagar o stack
+├── tests/                        # 47 testes, fixtures offline
 ├── reports/                      # resultados de latência (md + json)
 ├── docs/                         # model card e prints
 ├── Dockerfile                    # multi-stage (uv), usuário não-root, healthcheck
-├── docker-compose.yml            # nginx + API + Prometheus + Grafana + MLflow
+├── docker-compose.yml            # serving local: nginx + API + Prometheus + Grafana
+├── docker-compose.prod.yml       # serving na EC2: imagem do ECR, só a porta 80
 ├── params.yaml · pyproject.toml · uv.lock · Makefile
 ```
 
@@ -639,8 +748,8 @@ Hiperparâmetros, mapeamento de rótulos, quality gate e paridade mínima ficam 
 
 | Requisito | Onde | Status |
 |---|---|---|
-| Pipeline CI/CD (lint → test → build), ≥ 2 automações | [`ci.yml`](.github/workflows/ci.yml) (4 jobs) + [`cd.yml`](.github/workflows/cd.yml) (publicação no GHCR) | ✅ |
-| Script/DAG Airflow de treino (carregamento → treino → salvamento) | [`triage_training_dag.py`](dags/triage_training_dag.py) — 9 tasks com quality gate | ✅ |
+| Pipeline CI/CD (lint → test → build), ≥ 2 automações | [`ci.yml`](.github/workflows/ci.yml) (4 jobs) + [`cd.yml`](.github/workflows/cd.yml) (ECR + deploy na EC2) | ✅ |
+| Script/DAG Airflow de treino (carregamento → treino → salvamento) | [`triage_training_dag.py`](dags/triage_training_dag.py) — 10 tasks com quality gate | ✅ |
 | Dockerfile funcional do serviço de inferência | [`Dockerfile`](Dockerfile) — multi-stage, não-root, healthcheck | ✅ |
 | Compose com API + Prometheus + Grafana | [`docker-compose.yml`](docker-compose.yml) | ✅ |
 | Dashboard Grafana com ≥ 3 painéis | 11 painéis provisionados ([JSON](monitoring/grafana/dashboards/triage_api.json)) | ✅ |
@@ -651,6 +760,7 @@ Hiperparâmetros, mapeamento de rótulos, quality gate e paridade mínima ficam 
 | Decisão arquitetural em nuvem (batch × real-time) | [Seção acima](#️-decisão-de-arquitetura-em-nuvem) — EC2 + nginx (projeto) e ECS + ALB (produção) | ✅ |
 | Extra: rastreamento de experimentos e registry | MLflow com alias `champion` ([seção](#-rastreamento-de-experimentos-mlflow)) | ✅ |
 | Extra: proxy reverso | [`nginx/nginx.conf`](nginx/nginx.conf) | ✅ |
+| Extra: infraestrutura como código e deploy automatizado | [`infra/cloudformation.yml`](infra/cloudformation.yml) + CD (OIDC, ECR, SSM) — [passo a passo](#-deploy-na-aws) | ✅ |
 | Bibliotecas: Scikit-Learn, FastAPI, prometheus-client, Airflow | `pyproject.toml`, `orchestration/` | ✅ |
 | Dataset com ≥ 2.000 amostras | 11.227 laudos (Medical Abstracts TC Corpus) | ✅ |
 | Histórico de commits semântico | Conventional Commits (`feat`, `fix`, `perf`, `ci`, `docs`…) | ✅ |
