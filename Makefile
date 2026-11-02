@@ -4,6 +4,9 @@
 UV ?= uv run
 AIRFLOW_COMPOSE = docker compose -f orchestration/docker-compose.airflow.yml
 
+# Training logs to the MLflow server of the compose stack (skipped if it is not running).
+export MLFLOW_TRACKING_URI ?= http://127.0.0.1:5000
+
 help:           ## Lista os alvos disponíveis
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -29,7 +32,7 @@ test:           ## Testes com cobertura (offline, dataset sintético)
 models/model.onnx:
 	$(UV) python -m src.pipelines.train
 
-train:          ## Pipeline completo: download → validação → treino → gate → ONNX → publish
+train:          ## Pipeline completo: download → validação → treino → gate → ONNX → publish → MLflow
 	$(UV) python -m src.pipelines.train
 
 benchmark: models/model.onnx  ## Latência offline sklearn vs ONNX → reports/latency.md
@@ -40,10 +43,10 @@ benchmark: models/model.onnx  ## Latência offline sklearn vs ONNX → reports/l
 api: models/model.onnx  ## API local com reload em http://localhost:8000/docs
 	$(UV) uvicorn src.api.main:app --reload --host 0.0.0.0 --port 8000
 
-up: models/model.onnx   ## Sobe API + Prometheus + Grafana (docker compose)
+up: models/model.onnx   ## Sobe nginx + API + Prometheus + Grafana + MLflow (http://localhost)
 	docker compose up -d --build
 
-down:           ## Derruba a stack de monitoramento
+down:           ## Derruba a stack
 	docker compose down
 
 logs:           ## Logs da API
