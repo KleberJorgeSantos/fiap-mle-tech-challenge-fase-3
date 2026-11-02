@@ -2,7 +2,7 @@
 
     ingest_data >> validate_data >> preprocess >> train_model
         >> evaluate_model (quality gate) >> export_onnx (parity check)
-        >> publish_model >> reload_api
+        >> publish_model >> track_experiment (MLflow) >> reload_api
 
 Every task is a thin wrapper around ``src.pipelines.steps``: the same code runs
 in the CLI (``python -m src.pipelines.train``), in CI and here. Tasks exchange
@@ -83,6 +83,13 @@ def _publish_model(ti) -> str:
     )
 
 
+def _track_experiment() -> str | None:
+    from src.pipelines import steps
+
+    _, _, model_dir = _dirs()
+    return steps.track_experiment(model_dir)
+
+
 def _reload_api() -> None:
     """Ask the running API to load the new artifacts (no-op if it is offline)."""
     import urllib.request
@@ -121,6 +128,7 @@ with DAG(
     evaluate = PythonOperator(task_id="evaluate_model", python_callable=_evaluate_model)
     export = PythonOperator(task_id="export_onnx", python_callable=_export_onnx)
     publish = PythonOperator(task_id="publish_model", python_callable=_publish_model)
+    track = PythonOperator(task_id="track_experiment", python_callable=_track_experiment)
     reload_api = PythonOperator(task_id="reload_api", python_callable=_reload_api, retries=0)
 
-    ingest >> validate >> prep >> train >> evaluate >> export >> publish >> reload_api
+    ingest >> validate >> prep >> train >> evaluate >> export >> publish >> track >> reload_api

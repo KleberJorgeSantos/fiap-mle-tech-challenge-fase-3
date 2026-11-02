@@ -24,6 +24,8 @@ x-airflow-common: &airflow-common
     DATA_DIR: /opt/airflow/project/data
     MODEL_DIR: /opt/airflow/project/models
     REPORTS_DIR: /opt/airflow/project/reports
+    # MLflow and API of the main stack (docker-compose.yml), reached via the host
+    MLFLOW_TRACKING_URI: http://host.docker.internal:5000
     # API reloaded after a new model is published (soft-fail if it is not running)
     TRIAGE_API_URL: http://host.docker.internal:8000
   volumes:

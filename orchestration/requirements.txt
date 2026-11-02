@@ -2,7 +2,10 @@
 # scikit-learn MUST match uv.lock: the API unpickles the model trained here.
 scikit-learn==1.5.2
 skl2onnx==1.20.0
-onnx==1.23.2
-onnxruntime==1.31.1
+# onnx/onnxruntime are one step behind uv.lock: newer releases need protobuf>=5,
+# while Airflow 2.10 (providers, OpenTelemetry) is built on protobuf 4.25.
+onnx==1.22.0
+onnxruntime==1.26.0
 pydantic-settings==2.16.2
 truststore==0.10.5
+mlflow-skinny==3.17.2

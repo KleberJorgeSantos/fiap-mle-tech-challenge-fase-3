@@ -18,6 +18,7 @@ EXPECTED_ORDER = [
     "evaluate_model",
     "export_onnx",
     "publish_model",
+    "track_experiment",
     "reload_api",
 ]
 
