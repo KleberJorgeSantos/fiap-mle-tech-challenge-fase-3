@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 def run() -> str:
-    """ingest -> validate -> preprocess -> train -> evaluate -> export ONNX -> publish -> track."""
+    """ingest -> validate -> preprocess -> train -> evaluate -> export ONNX -> publish -> track -> cloud."""
     settings = get_settings()
     data_dir = settings.data_dir
     staging_dir = data_dir / "staging"
@@ -27,6 +27,7 @@ def run() -> str:
     parity = steps.export_onnx(model_path, splits["test"])
     version = steps.publish_model(staging_dir, settings.model_dir, metrics, parity, raw_path)
     steps.track_experiment(settings.model_dir)
+    steps.publish_to_cloud(settings.model_dir)
     logger.info("Pipeline finished: version=%s macro_f1=%.4f", version, metrics["macro_f1"])
     return version
 

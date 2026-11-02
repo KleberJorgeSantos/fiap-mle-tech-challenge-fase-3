@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     mlflow_experiment: str = "triage-nlp"
     mlflow_registered_model: str = "triage-classifier"
 
+    # Cloud delivery: disabled unless a models bucket is configured.
+    models_bucket: str | None = None
+    aws_region: str = "us-east-1"
+    github_repository: str | None = None  # owner/name, receives the repository_dispatch
+    github_dispatch_token: str | None = None
+
     # TLS-inspecting networks re-sign HTTPS with their own CA, unknown to certifi.
     ca_bundle: Path | None = None
 

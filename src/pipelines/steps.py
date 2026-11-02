@@ -152,3 +152,19 @@ def track_experiment(model_dir: Path) -> str | None:
     except Exception:
         logger.warning("MLflow tracking failed; model is published anyway", exc_info=True)
         return None
+
+
+def publish_to_cloud(model_dir: Path) -> str | None:
+    """Ship the published model to S3 and trigger the CD (no-op when not configured).
+
+    Unlike tracking, a configured-but-failing upload raises: the cloud would silently
+    keep serving the previous model, so the Airflow task must fail and retry.
+    """
+    from src.deploy.cloud import publish_model_to_s3, trigger_cd
+    from src.models.predictor import load_metadata
+
+    version = load_metadata(model_dir)["model_version"]
+    uri = publish_model_to_s3(model_dir, version)
+    if uri:
+        trigger_cd(version)
+    return uri

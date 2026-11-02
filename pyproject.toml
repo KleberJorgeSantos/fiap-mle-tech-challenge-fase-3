@@ -26,6 +26,7 @@ train = [
     "requests>=2.32",
     "truststore>=0.9",
     "mlflow-skinny>=3.0",
+    "boto3>=1.34",
 ]
 dev = [
     "pytest>=8.0",
