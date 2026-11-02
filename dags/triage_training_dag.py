@@ -2,13 +2,16 @@
 
     ingest_data >> validate_data >> preprocess >> train_model
         >> evaluate_model (quality gate) >> export_onnx (parity check)
-        >> publish_model >> track_experiment (MLflow)
-        >> publish_to_cloud (S3 + trigger CD) >> reload_api
+        >> compare_with_champion (champion x challenger, branch)
+            ├─ wins:  publish_model >> track_experiment (MLflow champion)
+            │            >> publish_to_cloud (S3 + trigger CD) >> reload_api
+            └─ loses: register_challenger (MLflow challenger; production untouched)
 
 Every task is a thin wrapper around ``src.pipelines.steps``: the same code runs
 in the CLI (``python -m src.pipelines.train``), in CI and here. Tasks exchange
 file paths and small metric dicts through XCom. If the quality gate or the
-ONNX parity check fails, the run stops and the model in production is untouched.
+ONNX parity check fails, the run stops; if the new model is worse than the one
+in production, only the challenger branch runs. Either way production is safe.
 """
 
 import logging
@@ -17,7 +20,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from airflow import DAG
-from airflow.operators.python import PythonOperator
+from airflow.operators.python import BranchPythonOperator, PythonOperator
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +74,29 @@ def _export_onnx(ti) -> dict:
     return steps.export_onnx(ti.xcom_pull(task_ids="train_model"), splits["test"])
 
 
+def _compare_with_champion(ti) -> str:
+    """Branch: return the task_id to follow; the other branch is skipped."""
+    from src.pipelines import steps
+
+    _, _, model_dir = _dirs()
+    decision = steps.compare_with_champion(ti.xcom_pull(task_ids="evaluate_model"), model_dir)
+    ti.xcom_push(key="decision", value=decision)
+    return "publish_model" if decision["promote"] else "register_challenger"
+
+
+def _register_challenger(ti) -> str | None:
+    from src.pipelines import steps
+
+    _, staging_dir, _ = _dirs()
+    return steps.register_challenger(
+        staging_dir,
+        metrics=ti.xcom_pull(task_ids="evaluate_model"),
+        parity=ti.xcom_pull(task_ids="export_onnx"),
+        decision=ti.xcom_pull(task_ids="compare_with_champion", key="decision"),
+        raw_path=ti.xcom_pull(task_ids="ingest_data"),
+    )
+
+
 def _publish_model(ti) -> str:
     from src.pipelines import steps
 
@@ -120,7 +146,7 @@ default_args = {
 
 with DAG(
     dag_id="triage_training_pipeline",
-    description="Ingest -> validate -> train -> evaluate -> ONNX -> publish the triage model",
+    description="Ingest -> train -> gates -> champion x challenger -> publish the triage model",
     default_args=default_args,
     start_date=datetime(2026, 1, 1),
     schedule="@weekly",
@@ -135,20 +161,15 @@ with DAG(
     train = PythonOperator(task_id="train_model", python_callable=_train_model)
     evaluate = PythonOperator(task_id="evaluate_model", python_callable=_evaluate_model)
     export = PythonOperator(task_id="export_onnx", python_callable=_export_onnx)
+    compare = BranchPythonOperator(
+        task_id="compare_with_champion", python_callable=_compare_with_champion
+    )
+    challenger = PythonOperator(task_id="register_challenger", python_callable=_register_challenger)
     publish = PythonOperator(task_id="publish_model", python_callable=_publish_model)
     track = PythonOperator(task_id="track_experiment", python_callable=_track_experiment)
     to_cloud = PythonOperator(task_id="publish_to_cloud", python_callable=_publish_to_cloud)
     reload_api = PythonOperator(task_id="reload_api", python_callable=_reload_api, retries=0)
 
-    (
-        ingest
-        >> validate
-        >> prep
-        >> train
-        >> evaluate
-        >> export
-        >> publish
-        >> track
-        >> to_cloud
-        >> reload_api
-    )
+    (ingest >> validate >> prep >> train >> evaluate >> export >> compare)
+    compare >> [publish, challenger]
+    publish >> track >> to_cloud >> reload_api
