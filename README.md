@@ -14,10 +14,12 @@ retreino orquestrado, observabilidade e otimização de latência com ONNX Runti
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white)
 ![Airflow](https://img.shields.io/badge/Airflow-2.10-017CEE?style=for-the-badge&logo=apacheairflow&logoColor=white)
+![MLflow](https://img.shields.io/badge/MLflow-3-0194E2?style=for-the-badge&logo=mlflow&logoColor=white)
+![nginx](https://img.shields.io/badge/nginx-reverse%20proxy-009639?style=for-the-badge&logo=nginx&logoColor=white)
 ![Prometheus](https://img.shields.io/badge/Prometheus-E6522C?style=for-the-badge&logo=prometheus&logoColor=white)
 ![Grafana](https://img.shields.io/badge/Grafana-F46800?style=for-the-badge&logo=grafana&logoColor=white)
 ![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-CI%2FCD-2088FF?style=for-the-badge&logo=githubactions&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-36%20passed%20·%2099%25%20cov-success?style=for-the-badge)
+![Tests](https://img.shields.io/badge/tests-41%20passed%20·%2098%25%20cov-success?style=for-the-badge)
 
 </div>
 
@@ -36,6 +38,7 @@ retreino orquestrado, observabilidade e otimização de latência com ONNX Runti
 - [📊 Monitoramento](#-monitoramento)
 - [🔁 CI/CD](#-cicd)
 - [🌬️ Orquestração com Airflow](#️-orquestração-com-airflow)
+- [🧪 Rastreamento de experimentos (MLflow)](#-rastreamento-de-experimentos-mlflow)
 - [⚙️ Configuração](#️-configuração)
 - [📁 Estrutura do projeto](#-estrutura-do-projeto)
 - [🎓 Como este projeto atende ao desafio](#-como-este-projeto-atende-ao-desafio)
@@ -68,7 +71,8 @@ pipeline CI/CD, retreino orquestrado, monitoramento e latência.
 | Latência HTTP fim a fim (Docker, 1 cliente) — p50 | 6,86 ms → **5,68 ms** |
 | Throughput HTTP com 8 clientes | 200 → **257 req/s** (**+29%**) |
 | Tamanho do artefato | 3,26 MB → **2,08 MB** |
-| Testes | 36 testes (33 locais + 3 da DAG no CI), cobertura **99%** |
+| Overhead do nginx (proxy reverso) | ~0,5 ms no p50 |
+| Testes | 41 testes (38 locais + 3 da DAG no CI), cobertura **98%** |
 
 Relatórios completos: [`reports/latency.md`](reports/latency.md) (modelo isolado) e
 [`reports/http_latency.md`](reports/http_latency.md) (API fim a fim).
@@ -89,19 +93,24 @@ flowchart LR
     B -- sucesso na main --> PU
 
     subgraph AF["Airflow (retreino semanal)"]
-        I[ingest] --> V[validate] --> P[preprocess] --> TR[train] --> E[evaluate<br/>quality gate] --> X[export ONNX<br/>parity check] --> PB[publish] --> RL[reload API]
+        I[ingest] --> V[validate] --> P[preprocess] --> TR[train] --> E[evaluate<br/>quality gate] --> X[export ONNX<br/>parity check] --> PB[publish] --> TK[track<br/>MLflow] --> RL[reload API]
     end
 
     DS[(Medical Abstracts<br/>GitHub raw)] --> I
     PB --> M[(models/<br/>model.onnx · model.joblib · metadata.json)]
 
     subgraph STACK["docker compose"]
-        API[FastAPI<br/>ONNX Runtime] -- /metrics --> PR[Prometheus] --> GF[Grafana]
+        NG[nginx :80] --> API[FastAPI<br/>ONNX Runtime]
+        NG --> GF[Grafana]
+        NG --> PR[Prometheus]
+        NG --> ML[MLflow<br/>tracking + registry]
+        API -- /metrics --> PR --> GF
     end
 
     M --> API
+    TK --> ML
     RL -. POST /admin/reload .-> API
-    U[Sistema do hospital / médico] -- POST /predict --> API
+    U[Sistema do hospital / médico] -- POST /predict --> NG
 ```
 
 | Componente | Tecnologia | Papel |
@@ -109,9 +118,11 @@ flowchart LR
 | Modelo | TF-IDF (1–2 gramas) + Regressão Logística | Classificador leve, interpretável e rápido |
 | Otimização | `skl2onnx` + ONNX Runtime | Pipeline inteiro (texto → probabilidades) em um grafo ONNX |
 | Serviço | FastAPI + Uvicorn em Docker (multi-stage, não-root) | Inferência real-time |
+| Proxy reverso | nginx | Porta única (80): roteia `/`, `/grafana/`, `/prometheus/`, `/mlflow/`; bloqueia `/metrics` externamente |
 | Métricas | `prometheus_client` (middleware próprio) | Requisições, latência, erros, inferência, classes |
 | Observabilidade | Prometheus + Grafana provisionados | Dashboard com 11 painéis versionado em JSON |
 | Orquestração | Airflow 2.10 (LocalExecutor) | Retreino com quality gate e publicação |
+| Experimentos | MLflow 3 (tracking + Model Registry) | Histórico de cada retreino; alias `champion` = modelo em produção |
 | CI/CD | GitHub Actions | CI: lint → test / dag-check → train + build + smoke · CD: push GHCR |
 
 ---
@@ -132,7 +143,57 @@ não se aplica aqui porque o valor do sistema está justamente em **reduzir o te
 O modelo é leve o bastante para que o real-time não custe caro, e o retreino (semanal) é naturalmente
 batch.
 
-### Arquitetura recomendada: AWS
+A arquitetura foi pensada em **duas camadas**: o que este projeto (educacional) implanta de fato, com
+custo mínimo, e como ela evoluiria para a produção real de um hospital.
+
+### Camada 1 — Implementação do projeto: AWS EC2 + Docker Compose + nginx
+
+```mermaid
+flowchart LR
+    U[Usuário / sistema do hospital] -->|HTTP :80| SG{{Security Group<br/>só 80/443 e 22}}
+    SG --> NG
+    subgraph EC2["EC2 t3.small · Docker Compose"]
+        NG[nginx] --> API[triage-api<br/>ONNX Runtime]
+        NG --> GF[Grafana]
+        NG --> PR[Prometheus]
+        NG --> ML[MLflow]
+        API --> PR
+    end
+    GHCR[(GHCR<br/>imagem do CD)] -->|docker compose pull| API
+```
+
+É o **mesmo `docker-compose.yml` do ambiente local**, numa única instância — o padrão já validado no
+Tech Challenge 1. O nginx é a única porta de entrada e cumpre, em escala de um servidor, o papel que um
+load balancer gerenciado teria:
+
+| Função | Como o nginx resolve |
+|---|---|
+| Porta única | Tudo entra pela 80 (ou 443 com Let's Encrypt); demais portas fechadas no Security Group |
+| Roteamento por caminho | `/` → API · `/grafana/` → Grafana · `/prometheus/` → Prometheus · `/mlflow/` → MLflow |
+| Proteção | `/metrics` bloqueado para a internet; limite de 1 MB por requisição; `server_tokens off` |
+| Desempenho | Conexões *keep-alive* com a API (overhead medido: ~0,5 ms no p50) |
+
+**Por que EC2 aqui:** custo previsível e baixo (uma `t3.small`, ~US$ 15/mês ligada 24h — e pode ser
+desligada fora das demonstrações), nenhum serviço gerenciado cobrando por hora, e reaproveita o
+conhecimento do TC1. O **Airflow não vai para a EC2** (precisa de 2–4 GB de RAM sozinho): o retreino roda
+localmente/sob demanda e o modelo chega à EC2 dentro da imagem publicada pelo CD.
+
+**Deploy:**
+
+```bash
+# Na EC2 (Amazon Linux 2023 / Ubuntu) com Docker e o plugin compose instalados
+git clone https://github.com/<usuario>/<repositorio>.git && cd <repositorio>
+export PUBLIC_URL=http://<ip-publico-da-ec2> GRAFANA_ADMIN_PASSWORD=<senha-forte>
+uv sync --all-extras && make train   # ou baixe o artefato "model-and-reports" do CI para models/
+docker compose up -d --build
+# Security Group: liberar 80 (e 443) para o mundo e 22 apenas para o seu IP
+```
+
+**Limites assumidos (aceitáveis para o projeto, não para o hospital):** um único servidor (sem alta
+disponibilidade — se a instância cair, a API cai), escala apenas vertical e deploy com alguns segundos
+de indisponibilidade.
+
+### Camada 2 — Evolução para produção no hospital: ECS Fargate + ALB
 
 ```mermaid
 flowchart LR
@@ -154,6 +215,18 @@ flowchart LR
 | Retreino | **MWAA** (Airflow gerenciado) | Reaproveita a mesma DAG deste repositório sem alterações de lógica |
 | Observabilidade | **Amazon Managed Prometheus + Grafana** | Mesmas métricas e o mesmo dashboard JSON do ambiente local |
 | CI/CD | GitHub Actions com **OIDC** | Sem chaves de longa duração no repositório |
+| Experimentos | MLflow em ECS (ou SageMaker MLflow gerenciado) + RDS + S3 | Mesmo tracking/registry do projeto, com backend durável |
+
+**O ALB substitui o nginx** quando há mais de um servidor: recebe HTTPS (certificado gratuito do ACM),
+distribui as requisições entre as tasks de várias zonas de disponibilidade, consulta o `/health` da API
+e tira de rotação a task que falhar, e só envia tráfego à nova versão depois que ela fica saudável
+(deploy sem downtime). O **ECS Express Mode** cria esse conjunto (serviço Fargate + ALB + HTTPS +
+autoscaling) a partir da imagem do container em um único passo.
+
+**Quando vale pagar por isso:** o ALB custa ~US$ 16–25/mês (hora + capacidade + IPs) e duas tasks
+Fargate de 0,5 vCPU / 1 GB, ~US$ 35/mês. Para o hospital, alta disponibilidade e deploy sem
+indisponibilidade justificam o custo; para o projeto educacional, a Camada 1 entrega o mesmo
+comportamento funcional por uma fração do preço.
 
 **Alternativas avaliadas e descartadas:**
 
@@ -162,7 +235,8 @@ flowchart LR
   Provisioned concurrency resolve, mas com custo similar ao Fargate e mais complexidade.
 - **SageMaker Real-time Endpoint** — ótimo para modelos pesados (GPU, multi-model), mas é
   superdimensionado e mais caro para um modelo de < 1 ms em CPU.
-- **EC2 (como no TC2)** — funciona, mas exige gerenciar SO, patches e escalonamento manual.
+- **AWS App Runner** — seria a opção mais simples, mas deixou de aceitar novos clientes em 30/04/2026;
+  a AWS indica o ECS Express Mode como substituto.
 - **Batch (AWS Batch / SageMaker Batch Transform)** — incompatível com o requisito de triagem
   imediata. Fica como complemento para **reprocessar o histórico** quando um novo modelo é publicado.
 
@@ -171,7 +245,9 @@ flowchart LR
 
 ### FinOps
 
-- Fargate com 2 tasks de **0,5 vCPU / 1 GB** atende centenas de req/s (o modelo usa < 1 ms de CPU por laudo).
+- **Projeto (Camada 1):** uma EC2 `t3.small` desligada quando não está em uso; imagem no GHCR (gratuito);
+  nenhum serviço gerenciado cobrando por hora. Dependendo da conta, os créditos de free tier cobrem o período.
+- **Produção (Camada 2):** Fargate com 2 tasks de **0,5 vCPU / 1 GB** atende centenas de req/s (o modelo usa < 1 ms de CPU por laudo).
   Autoscaling mínimo 2 (alta disponibilidade), máximo conforme o pico.
 - **Fargate Spot** para o ambiente de homologação; Savings Plans para produção.
 - Retreino semanal em MWAA no menor ambiente (`mw1.small`) — ou, para reduzir custo fixo, a mesma
@@ -201,15 +277,16 @@ equivalentes estão no [`Makefile`](Makefile)).
 # 1. Dependências
 uv sync --all-extras
 
-# 2. Treinar (baixa o dataset, valida, treina, aplica o quality gate, exporta ONNX e publica em models/)
+# 2. Stack completa: nginx + API + Prometheus + Grafana + MLflow
+#    (treina antes, se models/ estiver vazio)
+make up                          # = docker compose up -d --build
+
+# 3. Treinar (dataset → validação → treino → quality gate → ONNX → publish → MLflow)
 make train                       # = uv run python -m src.pipelines.train
 
-# 3. Testes e lint
+# 4. Testes e lint
 make test
 make lint
-
-# 4. Stack completa: API + Prometheus + Grafana
-make up                          # = docker compose up -d --build
 
 # 5. Gerar tráfego para ver o dashboard
 make traffic                     # 5 min de tráfego com 3% de requisições inválidas
@@ -218,12 +295,18 @@ make traffic                     # 5 min de tráfego com 3% de requisições inv
 make benchmark
 ```
 
+Tudo é servido pelo nginx na porta 80:
+
 | Serviço | URL | Acesso |
 |---|---|---|
-| API (Swagger) | http://localhost:8000/docs | — |
-| Prometheus | http://localhost:9090 | — |
-| Grafana | http://localhost:3000 | anônimo (viewer) ou `admin` / `admin` |
+| API (Swagger) | http://localhost/docs | — |
+| Grafana | http://localhost/grafana/ | anônimo (viewer) ou `admin` / `admin` |
+| Prometheus | http://localhost/prometheus/ | — |
+| MLflow | http://localhost/mlflow/ | — |
 | Airflow | http://localhost:8080 | `airflow` / `airflow` (após `make airflow-up`) |
+
+As portas diretas (`8000`, `3000`, `9090`, `5000`) continuam publicadas para depuração local e para o
+treino/Airflow alcançarem o MLflow; na EC2, o Security Group expõe apenas a 80.
 
 > 💡 **Windows/PowerShell:** use `curl.exe` (não o alias `curl`) e prefira `127.0.0.1` a `localhost` —
 > no Windows, `localhost` tenta IPv6 primeiro e adiciona ~40 ms a cada chamada.
@@ -331,7 +414,7 @@ e voltar ao original sem novo build.
 | `GET` | `/metrics` | Métricas no formato Prometheus |
 
 ```bash
-curl -X POST http://127.0.0.1:8000/predict \
+curl -X POST http://127.0.0.1/predict \
   -H "Content-Type: application/json" \
   -d '{"text": "Acute myocardial infarction with ST-segment elevation and severe chest pain."}'
 ```
@@ -354,8 +437,8 @@ Validação: texto vazio, sem palavras ou acima de `MAX_TEXT_LENGTH` → `422`; 
 
 ## 📊 Monitoramento
 
-`docker compose up` sobe **API + Prometheus + Grafana** com datasource e dashboard **provisionados como
-código** — nenhum clique manual.
+`docker compose up` sobe **API + Prometheus + Grafana** (atrás do nginx, com MLflow ao lado) com datasource
+e dashboard **provisionados como código** — nenhum clique manual. Grafana em http://localhost/grafana/.
 
 **Métricas expostas** ([`src/api/metrics.py`](src/api/metrics.py)):
 
@@ -435,7 +518,8 @@ docker run -p 8000:8000 ghcr.io/<usuario>/<repositorio>:latest
 DAG [`dags/triage_training_dag.py`](dags/triage_training_dag.py) — `triage_training_pipeline`, semanal:
 
 ```
-ingest_data → validate_data → preprocess → train_model → evaluate_model → export_onnx → publish_model → reload_api
+ingest_data → validate_data → preprocess → train_model → evaluate_model → export_onnx
+            → publish_model → track_experiment → reload_api
 ```
 
 | Task | Responsabilidade |
@@ -447,6 +531,7 @@ ingest_data → validate_data → preprocess → train_model → evaluate_model 
 | `evaluate_model` | **Quality gate**: falha se macro-F1 < 0,60 |
 | `export_onnx` | Converte para ONNX e falha se a paridade for < 99% |
 | `publish_model` | Grava `metadata.json` (versão, métricas, hash do dataset) e promove para `models/` |
+| `track_experiment` | Registra o run no MLflow e promove a versão a `champion` no Model Registry (não falha o pipeline se o MLflow estiver fora) |
 | `reload_api` | `POST /admin/reload` na API em execução (não falha se ela estiver fora) |
 
 Um modelo só chega a `models/` se passar pelo gate e pela paridade — caso contrário a produção continua
@@ -465,6 +550,37 @@ docker compose -f orchestration/docker-compose.airflow.yml exec airflow-schedule
 
 ---
 
+## 🧪 Rastreamento de experimentos (MLflow)
+
+Cada modelo publicado — pela CLI (`make train`) ou pela DAG — vira um **run no MLflow**
+([`src/tracking/mlflow_tracking.py`](src/tracking/mlflow_tracking.py)):
+
+| O que é registrado | Detalhe |
+|---|---|
+| Parâmetros | Hiperparâmetros do TF-IDF e da regressão logística (`params.yaml`) |
+| Métricas | Acurácia, macro-F1, F1 por classe, recall de `urgente`, paridade ONNX, tamanho dos artefatos |
+| Tags | Versão do modelo (a mesma do `metadata.json`), hash SHA-256 do dataset, classes |
+| Artefatos | `model.joblib`, `metadata.json` e o **modelo ONNX** (flavor `mlflow.onnx`) |
+| Model Registry | Modelo `triage-classifier`; a versão recém-publicada recebe o alias **`champion`** |
+
+Assim é possível comparar os retreinos semanais lado a lado na UI (http://localhost/mlflow/) e saber
+exatamente qual versão está em produção.
+
+![Runs no MLflow (um vindo do Airflow, outro do treino local)](docs/mlflow_runs.png)
+
+**Decisões de desenho:**
+
+- **Servidor MLflow no compose** (backend SQLite + `--serve-artifacts`): treino local e Airflow enviam
+  tudo por HTTP, sem precisar compartilhar disco.
+- **A API não depende do MLflow:** ela continua lendo `models/`. O MLflow é a camada de rastreabilidade,
+  não um ponto de falha do serving.
+- **Tracking não bloqueia o pipeline:** sem `MLFLOW_TRACKING_URI` ou com o servidor fora do ar, o treino
+  registra um aviso e segue (o quality gate e a paridade continuam obrigatórios). O cliente checa o
+  `/health` do servidor antes, para não ficar minutos em *retry*.
+- Cliente leve (`mlflow-skinny`) no treino e no Airflow; nenhum MLflow na imagem de inferência.
+
+---
+
 ## ⚙️ Configuração
 
 Variáveis de ambiente ([`.env.example`](.env.example)):
@@ -475,6 +591,11 @@ Variáveis de ambiente ([`.env.example`](.env.example)):
 | `MODEL_DIR` | `models` | Pasta com `model.onnx`, `model.joblib` e `metadata.json` |
 | `MAX_TEXT_LENGTH` | `20000` | Limite de caracteres por laudo |
 | `LOG_LEVEL` | `INFO` | Nível de log |
+| `MLFLOW_TRACKING_URI` | — (`make train` usa `http://127.0.0.1:5000`) | Servidor MLflow; vazio desliga o tracking |
+| `MLFLOW_EXPERIMENT` | `triage-nlp` | Experimento no MLflow |
+| `MLFLOW_REGISTERED_MODEL` | `triage-classifier` | Nome no Model Registry |
+| `PUBLIC_URL` | `http://localhost` | URL pública (EC2) usada nos links do Prometheus atrás do nginx |
+| `GRAFANA_ADMIN_PASSWORD` | `admin` | Senha do admin do Grafana (troque na EC2) |
 | `CA_BUNDLE` | — | Bundle de CA para redes com inspeção TLS |
 
 Hiperparâmetros, mapeamento de rótulos, quality gate e paridade mínima ficam em [`params.yaml`](params.yaml).
@@ -489,6 +610,7 @@ Hiperparâmetros, mapeamento de rótulos, quality gate e paridade mínima ficam 
 │   └── cd.yml                    # CD: train → build → push GHCR → verificação
 ├── dags/triage_training_dag.py   # DAG Airflow de retreino
 ├── orchestration/                # Airflow local (Dockerfile + compose + requirements)
+├── nginx/nginx.conf              # proxy reverso: /, /grafana/, /prometheus/, /mlflow/
 ├── monitoring/
 │   ├── prometheus.yml
 │   └── grafana/                  # datasource + provider + dashboard JSON
@@ -498,15 +620,16 @@ Hiperparâmetros, mapeamento de rótulos, quality gate e paridade mínima ficam 
 │   ├── models/                   # treino, export ONNX + paridade, backends de inferência
 │   ├── evaluation/metrics.py     # métricas + quality gate
 │   ├── pipelines/                # steps reutilizáveis + CLI de treino
+│   ├── tracking/                 # MLflow: run, artefatos, Model Registry (champion)
 │   └── api/                      # FastAPI, schemas, métricas Prometheus
 ├── scripts/
 │   ├── benchmark.py              # latência offline sklearn × ONNX
 │   └── load_test.py              # carga HTTP fim a fim / tráfego para o Grafana
-├── tests/                        # 36 testes, fixtures offline
+├── tests/                        # 41 testes, fixtures offline
 ├── reports/                      # resultados de latência (md + json)
 ├── docs/                         # model card e prints
 ├── Dockerfile                    # multi-stage (uv), usuário não-root, healthcheck
-├── docker-compose.yml            # API + Prometheus + Grafana
+├── docker-compose.yml            # nginx + API + Prometheus + Grafana + MLflow
 ├── params.yaml · pyproject.toml · uv.lock · Makefile
 ```
 
@@ -517,7 +640,7 @@ Hiperparâmetros, mapeamento de rótulos, quality gate e paridade mínima ficam 
 | Requisito | Onde | Status |
 |---|---|---|
 | Pipeline CI/CD (lint → test → build), ≥ 2 automações | [`ci.yml`](.github/workflows/ci.yml) (4 jobs) + [`cd.yml`](.github/workflows/cd.yml) (publicação no GHCR) | ✅ |
-| Script/DAG Airflow de treino (carregamento → treino → salvamento) | [`triage_training_dag.py`](dags/triage_training_dag.py) — 8 tasks com quality gate | ✅ |
+| Script/DAG Airflow de treino (carregamento → treino → salvamento) | [`triage_training_dag.py`](dags/triage_training_dag.py) — 9 tasks com quality gate | ✅ |
 | Dockerfile funcional do serviço de inferência | [`Dockerfile`](Dockerfile) — multi-stage, não-root, healthcheck | ✅ |
 | Compose com API + Prometheus + Grafana | [`docker-compose.yml`](docker-compose.yml) | ✅ |
 | Dashboard Grafana com ≥ 3 painéis | 11 painéis provisionados ([JSON](monitoring/grafana/dashboards/triage_api.json)) | ✅ |
@@ -525,7 +648,9 @@ Hiperparâmetros, mapeamento de rótulos, quality gate e paridade mínima ficam 
 | Otimização de performance vista em aula | ONNX Runtime — **5,3x** mais rápido, F1 idêntico | ✅ |
 | Comparação de latência original × otimizado | [`reports/latency.md`](reports/latency.md), [`reports/http_latency.md`](reports/http_latency.md) | ✅ |
 | Baseline de latência local em Docker | [`reports/http_latency.md`](reports/http_latency.md) | ✅ |
-| Decisão arquitetural em nuvem (batch × real-time) | [Seção acima](#️-decisão-de-arquitetura-em-nuvem) | ✅ |
+| Decisão arquitetural em nuvem (batch × real-time) | [Seção acima](#️-decisão-de-arquitetura-em-nuvem) — EC2 + nginx (projeto) e ECS + ALB (produção) | ✅ |
+| Extra: rastreamento de experimentos e registry | MLflow com alias `champion` ([seção](#-rastreamento-de-experimentos-mlflow)) | ✅ |
+| Extra: proxy reverso | [`nginx/nginx.conf`](nginx/nginx.conf) | ✅ |
 | Bibliotecas: Scikit-Learn, FastAPI, prometheus-client, Airflow | `pyproject.toml`, `orchestration/` | ✅ |
 | Dataset com ≥ 2.000 amostras | 11.227 laudos (Medical Abstracts TC Corpus) | ✅ |
 | Histórico de commits semântico | Conventional Commits (`feat`, `fix`, `perf`, `ci`, `docs`…) | ✅ |
