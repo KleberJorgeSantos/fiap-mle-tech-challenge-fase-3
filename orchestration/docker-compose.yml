@@ -1,12 +1,14 @@
 # ============================================================
-# Local Airflow (LocalExecutor + Postgres) for the retraining DAG
+# Local MLOps platform: Airflow (retraining) + MLflow (tracking/registry)
 #
-#   make airflow-up        # or: docker compose -f orchestration/docker-compose.airflow.yml up -d --build
-#   UI: http://localhost:8080  (airflow / airflow)
+#   make mlops-up          # or: docker compose -f orchestration/docker-compose.yml up -d --build
+#   Airflow UI: http://localhost:8080  (airflow / airflow)
+#   MLflow UI:  http://localhost:5000
 #
-# The project root is mounted at /opt/airflow/project, so the DAG reuses the
-# code in src/ and publishes the new model straight into ./models, which the
-# API container also mounts.
+# Kept apart from the serving stack (../docker-compose.yml): it is heavy, runs on a
+# schedule and never goes to the cloud. The project root is mounted at
+# /opt/airflow/project, so the DAG reuses the code in src/ and publishes the model
+# into ./models (local API) and, when configured, to S3 (cloud deploy).
 # ============================================================
 
 x-airflow-common: &airflow-common
@@ -24,21 +26,50 @@ x-airflow-common: &airflow-common
     DATA_DIR: /opt/airflow/project/data
     MODEL_DIR: /opt/airflow/project/models
     REPORTS_DIR: /opt/airflow/project/reports
-    # MLflow and API of the main stack (docker-compose.yml), reached via the host
-    MLFLOW_TRACKING_URI: http://host.docker.internal:5000
-    # API reloaded after a new model is published (soft-fail if it is not running)
+    MLFLOW_TRACKING_URI: http://mlflow:5000
+    # Local API (serving stack) reloaded after a new model is published; soft-fail if it is down
     TRIAGE_API_URL: http://host.docker.internal:8000
+    # Cloud delivery (optional, see README): publish the approved model to S3 and trigger the CD
+    MODELS_BUCKET: ${MODELS_BUCKET:-}
+    AWS_REGION: ${AWS_REGION:-us-east-1}
+    AWS_PROFILE: ${AWS_PROFILE:-default}
+    GITHUB_REPOSITORY: ${GITHUB_REPOSITORY:-}
+    GITHUB_DISPATCH_TOKEN: ${GITHUB_DISPATCH_TOKEN:-}
   volumes:
     - ..:/opt/airflow/project
     - ./logs:/opt/airflow/logs
+    # AWS credentials of your user (read-only). Defaults to an empty folder.
+    - ${AWS_CONFIG_DIR:-./aws}:/home/airflow/.aws:ro
   user: "${AIRFLOW_UID:-50000}:0"
   extra_hosts:
     - "host.docker.internal:host-gateway"
   depends_on: &airflow-depends
     postgres:
       condition: service_healthy
+    mlflow:
+      condition: service_started
 
 services:
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v3.17.2
+    container_name: triage-mlflow
+    ports:
+      - "5000:5000"
+    command:
+      - mlflow
+      - server
+      - --host=0.0.0.0
+      - --port=5000
+      - --backend-store-uri=sqlite:////mlflow/mlflow.db
+      # Artifacts are uploaded through the server: clients need no shared filesystem.
+      - --serve-artifacts
+      - --artifacts-destination=/mlflow/artifacts
+      # Host header check (MLflow 3): accept localhost, 127.0.0.1 and the "mlflow" service name.
+      - --allowed-hosts=*
+    volumes:
+      - mlflow_data:/mlflow
+    restart: unless-stopped
+
   postgres:
     image: postgres:13
     environment:
@@ -89,3 +120,4 @@ services:
 
 volumes:
   airflow_pg:
+  mlflow_data:
