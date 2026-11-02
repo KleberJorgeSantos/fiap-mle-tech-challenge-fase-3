@@ -25,12 +25,16 @@ ENV PATH="/app/.venv/bin:$PATH" \
     MODEL_DIR=/app/models \
     MODEL_BACKEND=onnx
 
+# Non-root user. The app only READS its files, so they stay owned by root: no
+# `chown -R` (which duplicated the whole .venv in an extra layer) and the process
+# cannot modify its own code or model.
+RUN useradd --create-home --uid 1001 appuser
+
 COPY --from=builder /app/.venv /app/.venv
 COPY params.yaml ./
 COPY src/ ./src/
 COPY models/ ./models/
 
-RUN useradd --create-home --uid 1001 appuser && chown -R appuser:appuser /app
 USER appuser
 
 EXPOSE 8000
