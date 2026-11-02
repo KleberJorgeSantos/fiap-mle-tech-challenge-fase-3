@@ -10,7 +10,7 @@ retreino orquestrado, observabilidade e otimização de latência com ONNX Runti
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![uv](https://img.shields.io/badge/uv-package%20manager-DE5FE9?style=for-the-badge&logo=astral&logoColor=white)
 ![scikit-learn](https://img.shields.io/badge/scikit--learn-1.5-F7931E?style=for-the-badge&logo=scikitlearn&logoColor=white)
-![ONNX](https://img.shields.io/badge/ONNX%20Runtime-5.3x%20mais%20rápido-005CED?style=for-the-badge&logo=onnx&logoColor=white)
+![ONNX](https://img.shields.io/badge/ONNX%20Runtime-3.6x%20mais%20rápido-005CED?style=for-the-badge&logo=onnx&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white)
 ![Airflow](https://img.shields.io/badge/Airflow-2.10-017CEE?style=for-the-badge&logo=apacheairflow&logoColor=white)
@@ -67,10 +67,10 @@ pipeline CI/CD, retreino orquestrado, monitoramento e latência.
 |---|---|
 | Macro-F1 (teste, 2.246 laudos) | **0,727** (recall da classe `urgente`: 0,753) |
 | Paridade sklearn × ONNX (rótulos) | **100%** no conjunto de teste |
-| Latência do modelo, 1 laudo — p95 | 3,42 ms → **0,61 ms** (**5,6x**) |
-| Throughput do modelo, 1 laudo/chamada | 477 → **2.551 req/s** (**5,3x**) |
-| Latência HTTP fim a fim (Docker, 1 cliente) — p50 | 6,86 ms → **5,68 ms** |
-| Throughput HTTP com 8 clientes | 200 → **257 req/s** (**+29%**) |
+| Latência do modelo, 1 laudo — média / p50 | 1,37 ms → **0,38 ms** (**3,6x**) · 1,32 → **0,35 ms** (**3,8x**) |
+| Throughput do modelo, 1 laudo/chamada | 732 → **2.604 req/s** (**3,6x**) |
+| Latência HTTP fim a fim (Docker, 8 clientes) — p95 | 65,8 ms → **52,5 ms** (**-20%**) |
+| Throughput HTTP com 8 clientes | 162 → **205 req/s** (**+26%**) |
 | Tamanho do artefato | 3,26 MB → **2,08 MB** |
 | Overhead do nginx (proxy reverso) | ~0,5 ms no p50 |
 | Testes | 56 testes (52 locais + 4 da DAG no CI), cobertura **98%** |
@@ -281,7 +281,7 @@ comportamento funcional por uma fração do preço.
 - **Fargate Spot** para o ambiente de homologação; Savings Plans para produção.
 - Retreino semanal em MWAA no menor ambiente (`mw1.small`) — ou, para reduzir custo fixo, a mesma
   DAG pode virar uma *ECS Scheduled Task*.
-- A otimização com ONNX tem efeito direto em custo: **5x mais throughput por vCPU** significa menos tasks
+- A otimização com ONNX tem efeito direto em custo: **~3,5x mais throughput por vCPU** significa menos tasks
   para o mesmo volume.
 
 ### Segurança e LGPD
@@ -385,16 +385,17 @@ Técnica aplicada: **conversão do pipeline completo para ONNX e inferência com
 inclui tokenização, TF-IDF e o classificador — a API recebe texto e devolve probabilidades sem passar
 pelo scikit-learn.
 
-**Resultados — modelo isolado** (`make benchmark`, 1.000 laudos reais, após warm-up):
+**Resultados — modelo isolado** (`make benchmark`, 2.000 laudos reais, após warm-up):
 
 | Métrica | scikit-learn (original) | ONNX Runtime (otimizado) | Ganho |
 |---|---:|---:|---:|
-| Latência média (1 laudo) | 2,096 ms | 0,392 ms | **5,3x** |
-| p50 (1 laudo) | 1,893 ms | 0,365 ms | **5,2x** |
-| p95 (1 laudo) | 3,419 ms | 0,606 ms | **5,6x** |
-| p99 (1 laudo) | 3,994 ms | 0,784 ms | **5,1x** |
-| Throughput (1 laudo/chamada) | 477 req/s | 2.551 req/s | **5,3x** |
-| p95 (lote de 32) | 15,20 ms | 13,26 ms | 1,1x |
+| Latência média (1 laudo) | 1,365 ms | 0,384 ms | **3,6x** |
+| p50 (1 laudo) | 1,324 ms | 0,352 ms | **3,8x** |
+| p95 (1 laudo) | 1,779 ms | 0,606 ms | **2,9x** |
+| p99 (1 laudo) | 2,213 ms | 0,898 ms | **2,5x** |
+| Throughput (1 laudo/chamada) | 732 req/s | 2.604 req/s | **3,6x** |
+| p95 (lote de 32) | 17,54 ms | 11,58 ms | 1,5x |
+| Tempo de carga | 411 ms | 231 ms | 1,8x |
 | Tamanho do artefato | 3,26 MB | 2,08 MB | 1,6x menor |
 | Macro-F1 (teste) | 0,7271 | 0,7271 | idêntico |
 
@@ -402,17 +403,23 @@ pelo scikit-learn.
 
 | Cenário | Backend | Throughput | p50 | p95 | p99 |
 |---|---|---:|---:|---:|---:|
-| 1 cliente | scikit-learn | 137 req/s | 6,86 ms | 9,87 ms | 12,80 ms |
-| 1 cliente | **ONNX Runtime** | **164 req/s** | **5,68 ms** | **7,97 ms** | **10,90 ms** |
-| 8 clientes | scikit-learn | 200 req/s | 35,16 ms | 49,59 ms | 69,10 ms |
-| 8 clientes | **ONNX Runtime** | **257 req/s** | **26,25 ms** | **41,37 ms** | **54,59 ms** |
+| 1 cliente | scikit-learn | 69 req/s | 13,71 ms | 19,42 ms | 25,38 ms |
+| 1 cliente | **ONNX Runtime** | **75 req/s** | **12,86 ms** | **17,34 ms** | **21,32 ms** |
+| 8 clientes | scikit-learn | 162 req/s | 44,70 ms | 65,75 ms | 83,68 ms |
+| 8 clientes | **ONNX Runtime** | **205 req/s** | **34,78 ms** | **52,53 ms** | **68,40 ms** |
+
+> Os valores **absolutos** de HTTP dependem do estado da máquina (Windows + Docker Desktop, com antivírus e
+> outros processos): ao longo do desenvolvimento, o mesmo código mediu de ~6 ms a ~13 ms no p50 com 1
+> cliente — inclusive com a API fora do Docker. O que se mantém em todas as rodadas é a **comparação**,
+> medida nas mesmas condições: ganho grande no modelo isolado e ganho que cresce sob concorrência na API.
 
 **Por que o ganho é maior no modelo isolado do que na API?** O scikit-learn tem um custo fixo alto por
 chamada (validação de entrada, matrizes esparsas SciPy, overhead Python) — exatamente o que domina quando
 se classifica **um laudo por vez**, o padrão real-time. O ONNX Runtime executa o grafo em C++ sem esse
-overhead. Na API, ~5 ms são de HTTP/serialização e diluem o ganho; sob concorrência, quando a CPU do
-modelo vira gargalo, o ONNX volta a aparecer (+29% de throughput). Em lotes grandes, os dois convergem
-porque o custo passa a ser a tokenização.
+overhead. Na API, o tempo dentro do modelo (~1 ms) é pequeno perto do HTTP/serialização do cliente e do
+servidor, que dilui o ganho com 1 cliente (~7%); sob concorrência, quando a CPU do modelo vira gargalo,
+o ONNX volta a aparecer (+26% de throughput, -20% no p95). Em lotes, os dois se aproximam porque o
+custo passa a ser a tokenização.
 
 **Decisões técnicas da conversão** (cada uma validada por teste):
 
@@ -762,7 +769,7 @@ O Airflow lê as variáveis de nuvem de `orchestration/.env` ([exemplo](orchestr
 | Compose com API + Prometheus + Grafana | [`docker-compose.yml`](docker-compose.yml) | ✅ |
 | Dashboard Grafana com ≥ 3 painéis | 11 painéis provisionados ([JSON](monitoring/grafana/dashboards/triage_api.json)) | ✅ |
 | Instrumentação com `prometheus_client` (tempo e contagem) | [`src/api/metrics.py`](src/api/metrics.py) | ✅ |
-| Otimização de performance vista em aula | ONNX Runtime — **5,3x** mais rápido, F1 idêntico | ✅ |
+| Otimização de performance vista em aula | ONNX Runtime — **3,6x** mais rápido no modelo, F1 idêntico | ✅ |
 | Comparação de latência original × otimizado | [`reports/latency.md`](reports/latency.md), [`reports/http_latency.md`](reports/http_latency.md) | ✅ |
 | Baseline de latência local em Docker | [`reports/http_latency.md`](reports/http_latency.md) | ✅ |
 | Decisão arquitetural em nuvem (batch × real-time) | [Seção acima](#️-decisão-de-arquitetura-em-nuvem) — EC2 + nginx (projeto) e ECS + ALB (produção) | ✅ |

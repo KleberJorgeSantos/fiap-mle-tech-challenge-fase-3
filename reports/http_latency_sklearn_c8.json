@@ -5,9 +5,9 @@
     "200": 3000
   },
   "concurrency": 8,
-  "throughput_rps": 199.6,
-  "mean_ms": 36.6,
-  "p50_ms": 35.163,
-  "p95_ms": 49.586,
-  "p99_ms": 69.101
+  "throughput_rps": 162.3,
+  "mean_ms": 46.38,
+  "p50_ms": 44.699,
+  "p95_ms": 65.753,
+  "p99_ms": 83.684
 }
