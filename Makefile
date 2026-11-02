@@ -81,7 +81,7 @@ infra-up:       ## Cria/atualiza o stack AWS (GITHUB_REPO=dono/repo [BUDGET_EMAI
 	aws cloudformation deploy --stack-name $(STACK) --region $(AWS_REGION) \
 		--template-file infra/cloudformation.yml --capabilities CAPABILITY_IAM \
 		--parameter-overrides GitHubRepository=$(GITHUB_REPO) BudgetEmail=$(BUDGET_EMAIL)
-	@$(MAKE) --no-print-directory infra-outputs
+	@"$(MAKE)" --no-print-directory infra-outputs
 
 infra-outputs:  ## Mostra os valores para as variáveis do GitHub e do orchestration/.env
 	aws cloudformation describe-stacks --stack-name $(STACK) --region $(AWS_REGION) \
