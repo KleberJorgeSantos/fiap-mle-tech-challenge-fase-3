@@ -20,8 +20,8 @@
     {
       "id": 1,
       "type": "stat",
-      "title": "Total de requisições",
-      "description": "Requisições de inferência no intervalo selecionado",
+      "title": "Total de requisições (desde o início da API)",
+      "description": "Contagem exata do contador http_requests_total (zera quando a API reinicia). increase() estimaria o valor e perderia o primeiro incremento de cada série com pouco tráfego.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -38,7 +38,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(increase(http_requests_total{job=\"triage-api\"}[$__range]))",
+          "expr": "sum(http_requests_total{job=\"triage-api\"})",
           "legendFormat": "",
           "refId": "A",
           "range": false,

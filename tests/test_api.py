@@ -83,3 +83,14 @@ def test_metrics_endpoint_exposes_custom_metrics(client) -> None:
     assert "http_request_duration_seconds_bucket" in text
     assert 'model_inference_seconds_count{backend="onnx"}' in text
     assert 'predictions_total{label="urgente"}' in text
+
+
+def test_metrics_label_swagger_routes_and_collapse_unknown_paths(client) -> None:
+    client.get("/docs")
+    client.get("/openapi.json")
+    client.get("/wp-login.php")  # scanner noise -> 404
+    text = client.get("/metrics").text
+    assert 'endpoint="/docs"' in text
+    assert 'endpoint="/openapi.json"' in text
+    assert 'endpoint="unmatched",method="GET",status="404"' in text
+    assert "wp-login" not in text

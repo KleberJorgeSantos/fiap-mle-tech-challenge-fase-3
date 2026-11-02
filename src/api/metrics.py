@@ -15,6 +15,7 @@ import time
 from fastapi import FastAPI, Request
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, Info, generate_latest
 from starlette.responses import Response
+from starlette.routing import Match
 
 # Sub-millisecond buckets: ONNX inference of a single report takes well under 1 ms.
 _LATENCY_BUCKETS = (0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5)
@@ -41,9 +42,21 @@ _EXCLUDED_PATHS = {"/metrics", "/health"}
 
 
 def _endpoint_of(request: Request) -> str:
-    """Route template (``/predict``) instead of the raw path, to bound label cardinality."""
+    """Route template (``/predict``) instead of the raw path, to bound label cardinality.
+
+    FastAPI API routes store themselves in ``scope["route"]``; plain Starlette routes
+    (Swagger's ``/docs``, ``/openapi.json``) do not, so they are matched against the
+    route table. Unknown paths (404s) collapse into ``unmatched``: one label, not one
+    per random URL a scanner tries.
+    """
     route = request.scope.get("route")
-    return getattr(route, "path", "unmatched")
+    if route is not None:
+        return route.path
+    for candidate in request.app.router.routes:
+        match, _ = candidate.matches(request.scope)
+        if match == Match.FULL:
+            return getattr(candidate, "path", "unmatched")
+    return "unmatched"
 
 
 def setup_metrics(app: FastAPI) -> None:
