@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     max_text_length: int = 20_000
     log_level: str = "INFO"
 
+    # Experiment tracking: disabled when no tracking URI is configured.
+    mlflow_tracking_uri: str | None = None
+    mlflow_experiment: str = "triage-nlp"
+    mlflow_registered_model: str = "triage-classifier"
+
     # TLS-inspecting networks re-sign HTTPS with their own CA, unknown to certifi.
     ca_bundle: Path | None = None
 

@@ -140,3 +140,15 @@ def publish_model(
         os.replace(tmp, model_dir / name)
     logger.info("Published model %s to %s", metadata["model_version"], model_dir)
     return metadata["model_version"]
+
+
+def track_experiment(model_dir: Path) -> str | None:
+    """Log the published model to MLflow (best effort: never fails the pipeline)."""
+    from src.models.predictor import load_metadata
+    from src.tracking.mlflow_tracking import log_training_run
+
+    try:
+        return log_training_run(model_dir, load_metadata(model_dir))
+    except Exception:
+        logger.warning("MLflow tracking failed; model is published anyway", exc_info=True)
+        return None

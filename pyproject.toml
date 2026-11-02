@@ -25,6 +25,7 @@ train = [
     "onnx>=1.16",
     "requests>=2.32",
     "truststore>=0.9",
+    "mlflow-skinny>=3.0",
 ]
 dev = [
     "pytest>=8.0",
