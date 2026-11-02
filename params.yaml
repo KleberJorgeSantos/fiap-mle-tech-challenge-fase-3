@@ -1,0 +1,39 @@
+# Pipeline hyper-parameters (versioned with the code; read by src.config.load_params)
+
+data:
+  base_url: "https://raw.githubusercontent.com/sebischair/Medical-Abstracts-TC-Corpus/main"
+  files: ["medical_tc_train.csv", "medical_tc_test.csv"]
+  text_column: medical_abstract
+  label_column: condition_label
+  min_rows: 2000
+  test_size: 0.2
+  random_state: 42
+
+# Proxy mapping: original disease category -> clinical urgency level.
+# 1 neoplasms | 2 digestive | 3 nervous system | 4 cardiovascular | 5 general pathological
+label_mapping:
+  1: atencao
+  2: atencao
+  3: urgente
+  4: urgente
+  5: normal
+
+model:
+  tfidf:
+    ngram_range: [1, 2]
+    max_features: 50000
+    min_df: 2
+    # false on purpose: skl2onnx converts sublinear_tf inexactly (proba diffs up to
+    # ~0.03 vs sklearn). Costs ~0.5 pp macro-F1 and buys exact ONNX parity.
+    sublinear_tf: false
+  classifier:
+    C: 4.0
+    max_iter: 1000
+    class_weight: balanced
+
+quality_gate:
+  min_macro_f1: 0.60
+
+onnx:
+  min_parity: 0.99
+  opset: 15
