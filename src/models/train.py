@@ -1,6 +1,8 @@
 """Training of the TF-IDF + Logistic Regression triage classifier."""
 
 import logging
+import pickle
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -57,3 +59,19 @@ def train_model(train: pd.DataFrame, model_params: dict[str, Any]) -> Pipeline:
     pipeline.fit(train[TEXT_COLUMN].tolist(), train[TARGET_COLUMN].tolist())
     logger.info("Vocabulary size: %d", len(pipeline.named_steps["tfidf"].vocabulary_))
     return pipeline
+
+
+def save_model(pipeline: Pipeline, path: Path) -> Path:
+    """Serialize the pipeline so it loads in any environment (``joblib.load`` reads it).
+
+    Uses the C ``pickle`` implementation on purpose. Airflow imports ``dill``, which
+    registers its reducers in the pure-Python pickler at import time, and joblib copies
+    that dispatch table when *it* is imported. Inside an Airflow task (dill imported
+    first) ``joblib.dump`` therefore writes references to ``dill._dill`` and the model
+    fails to load where dill is absent: the API image, MLflow, a laptop. The C pickler
+    ignores that table.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as handle:
+        pickle.dump(pipeline, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    return path

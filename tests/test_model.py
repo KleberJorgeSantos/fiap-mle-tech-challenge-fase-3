@@ -72,3 +72,27 @@ def test_onnx_graph_has_no_locale_dependent_ops(model_dir) -> None:
 
     graph = onnx.load(str(model_dir / ONNX_MODEL_FILE)).graph
     assert "StringNormalizer" not in {node.op_type for node in graph.node}
+
+
+def test_save_model_ignores_reducers_injected_into_the_python_pickler(
+    model_dir, tmp_path, monkeypatch
+) -> None:
+    """Simulates Airflow's dill: reducers injected into the pure-Python pickler tables
+    (the stock one and joblib's copy) must not leak into the saved model."""
+    import pickle
+
+    import joblib
+    from joblib import numpy_pickle
+
+    from src.models.train import save_model
+
+    def poisoned(*_args, **_kwargs):
+        raise AssertionError("pure-Python pickler dispatch must not be used")
+
+    for table in (pickle._Pickler.dispatch, numpy_pickle.NumpyPickler.dispatch):
+        monkeypatch.setitem(table, dict, poisoned)
+
+    target = save_model(joblib.load(model_dir / SKLEARN_MODEL_FILE), tmp_path / "m.joblib")
+
+    restored = joblib.load(target)
+    assert list(restored.classes_) == sorted(LABELS)

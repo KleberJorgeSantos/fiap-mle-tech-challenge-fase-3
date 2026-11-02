@@ -33,7 +33,7 @@ from src.config import (
 from src.data.preprocessing import file_sha256, map_labels, split_dataset, validate_dataset
 from src.evaluation.metrics import check_quality_gate, evaluate
 from src.models.export_onnx import check_parity, export_to_onnx
-from src.models.train import train_model
+from src.models.train import save_model, train_model
 
 logger = logging.getLogger(__name__)
 
@@ -76,10 +76,7 @@ def train(train_path: str, staging_dir: Path, params: dict[str, Any] | None = No
     """Fit the classifier and save it to the staging folder."""
     params = params or load_params()
     pipeline = train_model(pd.read_csv(train_path), params["model"])
-    staging_dir.mkdir(parents=True, exist_ok=True)
-    target = staging_dir / SKLEARN_MODEL_FILE
-    joblib.dump(pipeline, target)
-    return str(target)
+    return str(save_model(pipeline, staging_dir / SKLEARN_MODEL_FILE))
 
 
 def evaluate_model(
