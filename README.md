@@ -27,6 +27,7 @@ retreino orquestrado, observabilidade e otimização de latência com ONNX Runti
 
 ## 📋 Sumário
 
+- [🌐 Demo online](#-demo-online)
 - [🎯 Contexto](#-contexto)
 - [🏆 Resultados](#-resultados)
 - [🏗️ Arquitetura](#️-arquitetura)
@@ -44,6 +45,26 @@ retreino orquestrado, observabilidade e otimização de latência com ONNX Runti
 - [📁 Estrutura do projeto](#-estrutura-do-projeto)
 - [🎓 Como este projeto atende ao desafio](#-como-este-projeto-atende-ao-desafio)
 - [🎬 Vídeo](#-vídeo)
+
+---
+
+## 🌐 Demo online
+
+A stack de produção está implantada na AWS (EC2 + nginx, endereço fixo, 24h) pelo pipeline de CD:
+
+| Serviço | Endereço |
+|---|---|
+| **API (Swagger — teste o `POST /predict`)** | http://3.222.236.70/docs |
+| Health check | http://3.222.236.70/health |
+| Grafana (visualização anônima) | http://3.222.236.70/grafana/ |
+| Prometheus | http://3.222.236.70/prometheus/ |
+
+```bash
+curl -X POST http://3.222.236.70/predict   -H "Content-Type: application/json"   -d '{"text": "Colon adenocarcinoma with liver metastasis, chemotherapy planned."}'
+```
+
+> Ambiente acadêmico mantido no ar durante o período de avaliação. Os textos de exemplo devem estar em
+> inglês (idioma do corpus de treino).
 
 ---
 
