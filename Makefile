@@ -1,5 +1,5 @@
 .PHONY: help install lint format test train benchmark api up down logs load-test traffic \
-        mlops-up mlops-down infra-up infra-outputs infra-down clean
+        eda mlops-up mlops-down infra-up infra-outputs infra-down clean
 
 UV ?= uv run
 MLOPS_COMPOSE = docker compose -f orchestration/docker-compose.yml
@@ -46,6 +46,9 @@ train:          ## Pipeline completo: dados → treino → gate → ONNX → pub
 
 benchmark: models/model.onnx  ## Latência offline sklearn vs ONNX → reports/latency.md
 	$(UV) python -m scripts.benchmark
+
+eda:            ## Executa o notebook de EDA e salva os gráficos (notebooks/01_eda.ipynb)
+	cd notebooks && $(UV) jupyter nbconvert --to notebook --execute --inplace 01_eda.ipynb
 
 # ── Serving: API + monitoramento (local) ─────────────────────────────────────
 

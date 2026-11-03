@@ -333,6 +333,16 @@ Como o corpus não traz urgência, as categorias foram mapeadas para níveis de 
 
 Distribuição balanceada: 3.928 `urgente` · 3.741 `atencao` · 3.558 `normal`.
 
+**Análise exploratória** ([`notebooks/01_eda.ipynb`](notebooks/01_eda.ipynb), reexecutável com `make eda`):
+liga cada achado a uma decisão do pipeline. Os principais:
+
+| Achado | Decisão |
+|---|---|
+| 5 categorias desbalanceadas (1.494 a 4.805) → 3 classes equilibradas após o mapeamento | Macro-F1 como métrica principal; `class_weight="balanced"` |
+| **22% de duplicatas**, 91% delas com categorias conflitantes (corpus na prática multi-rótulo) | Deduplicação **antes** do split, para evitar *data leakage* |
+| Textos com mediana de 170–186 palavras; tamanho não separa as classes | Modelo baseado em conteúdo (TF-IDF); limite de 20.000 caracteres na API |
+| **24,6% dos textos `normal` têm termos de quadro agudo** (mais que `urgente`, 16,0%) | Limitação do rótulo *proxy*, documentada no model card |
+
 **Modelo:** `TfidfVectorizer` (uni+bigramas, 50 mil termos) + `LogisticRegression(class_weight="balanced")`.
 Um modelo linear sobre TF-IDF é a escolha certa para o requisito de latência: treina em segundos,
 infere em sub-milissegundo em CPU e é explicável (pesos por termo).
@@ -718,6 +728,7 @@ O Airflow lê as variáveis de nuvem de `orchestration/.env` ([exemplo](orchestr
 │   ├── tracking/                 # MLflow: run, artefatos, Model Registry (champion)
 │   ├── deploy/                   # publicação do modelo no S3 + disparo do CD
 │   └── api/                      # FastAPI, schemas, métricas Prometheus
+├── notebooks/01_eda.ipynb        # análise exploratória: achados → decisões do pipeline
 ├── scripts/
 │   ├── benchmark.py              # latência offline sklearn × ONNX
 │   ├── load_test.py              # carga HTTP fim a fim / tráfego para o Grafana
