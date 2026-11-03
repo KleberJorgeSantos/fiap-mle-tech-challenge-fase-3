@@ -28,6 +28,13 @@ Parameters:
     Default: "true"
     AllowedValues: ["true", "false"]
     Description: Start/stop the instance automatically (saves ~70% of the EC2 cost)
+  UseElasticIp:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      Fixed public IP that survives stop/start (e.g. while the project is being evaluated).
+      Costs ~USD 3.60/month, charged even while the instance is stopped.
   StartCron:
     Type: String
     Default: cron(0 8 ? * MON-FRI *)
@@ -50,6 +57,7 @@ Parameters:
 Conditions:
   CreateOidc: !Equals [!Ref CreateGitHubOidcProvider, "true"]
   ScheduleOn: !Equals [!Ref EnableSchedule, "true"]
+  ElasticIpOn: !Equals [!Ref UseElasticIp, "true"]
   BudgetOn: !Not [!Equals [!Ref BudgetEmail, ""]]
 
 Resources:
@@ -269,6 +277,17 @@ Resources:
           echo "/swapfile swap swap defaults 0 0" >> /etc/fstab
           mkdir -p /opt/triage
 
+  # Fixed address for evaluators/bookmarks; associated with the instance on creation.
+  AppElasticIp:
+    Type: AWS::EC2::EIP
+    Condition: ElasticIpOn
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref AppInstance
+      Tags:
+        - Key: Name
+          Value: triage-api
+
   # ── Cost controls ─────────────────────────────────────────────────────────────
   SchedulerRole:
     Type: AWS::IAM::Role
@@ -365,5 +384,8 @@ Outputs:
     Description: Attach to your IAM user so the local Airflow can publish models to S3
     Value: !Ref ModelPublisherPolicy
   PublicUrl:
-    Description: Current public URL (changes after a stop/start; the CD prints the current one)
-    Value: !Sub http://${AppInstance.PublicIp}
+    Description: Public URL (fixed with UseElasticIp=true; otherwise changes after a stop/start)
+    Value: !If
+      - ElasticIpOn
+      - !Sub http://${AppElasticIp.PublicIp}
+      - !Sub http://${AppInstance.PublicIp}

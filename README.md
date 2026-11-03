@@ -689,6 +689,16 @@ imagem na EC2 — **sem nenhum passo manual**.
 - **Rollback:** pela sessão SSM, aponte para uma tag anterior do ECR:
   `cd /opt/triage && sudo API_IMAGE=<ecr>:<tag-anterior> AWS_REGION=us-east-1 BUNDLE_URI=s3://<bucket>/deploy/<sha>/ bash ec2_deploy.sh`.
 
+**Período de avaliação (endereço fixo, 24h):** por padrão a EC2 desliga à noite e o IP muda a cada
+religamento. Enquanto o projeto estiver sendo avaliado, deixe o endereço fixo (IP Elástico) e a
+instância sempre ligada (~US$ 20/mês em vez de ~US$ 8,50):
+
+```bash
+make infra-up GITHUB_REPO=<dono>/<repositorio> BUDGET_EMAIL=<email> ELASTIC_IP=true SCHEDULE=false
+```
+
+Depois da avaliação, volte ao modo econômico (`ELASTIC_IP=false SCHEDULE=true`) ou apague tudo.
+
 **5. Apagar tudo (custo zero):**
 
 ```bash

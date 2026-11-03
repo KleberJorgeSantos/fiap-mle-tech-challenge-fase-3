@@ -12,6 +12,8 @@ STACK        ?= triage-api
 AWS_REGION   ?= us-east-1
 GITHUB_REPO  ?=
 BUDGET_EMAIL ?=
+ELASTIC_IP   ?= false   # true: fixed public IP (evaluation period)
+SCHEDULE     ?= true    # false: instance on 24/7
 
 help:           ## Lista os alvos disponíveis
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -76,11 +78,12 @@ mlops-down:     ## Derruba Airflow + MLflow
 
 # ── Infraestrutura AWS (CloudFormation) ──────────────────────────────────────
 
-infra-up:       ## Cria/atualiza o stack AWS (GITHUB_REPO=dono/repo [BUDGET_EMAIL=...])
+infra-up:       ## Cria/atualiza o stack AWS (GITHUB_REPO=dono/repo [BUDGET_EMAIL=] [ELASTIC_IP=true] [SCHEDULE=false])
 	@test -n "$(GITHUB_REPO)" || (echo "Uso: make infra-up GITHUB_REPO=dono/repo [BUDGET_EMAIL=voce@email]" && exit 1)
 	aws cloudformation deploy --stack-name $(STACK) --region $(AWS_REGION) \
 		--template-file infra/cloudformation.yml --capabilities CAPABILITY_IAM \
-		--parameter-overrides GitHubRepository=$(GITHUB_REPO) BudgetEmail=$(BUDGET_EMAIL)
+		--parameter-overrides GitHubRepository=$(GITHUB_REPO) BudgetEmail=$(BUDGET_EMAIL) \
+		UseElasticIp=$(ELASTIC_IP) EnableSchedule=$(SCHEDULE)
 	@"$(MAKE)" --no-print-directory infra-outputs
 
 infra-outputs:  ## Mostra os valores para as variáveis do GitHub e do orchestration/.env
