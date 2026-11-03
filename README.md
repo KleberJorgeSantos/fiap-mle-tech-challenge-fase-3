@@ -19,7 +19,7 @@ retreino orquestrado, observabilidade e otimização de latência com ONNX Runti
 ![Prometheus](https://img.shields.io/badge/Prometheus-E6522C?style=for-the-badge&logo=prometheus&logoColor=white)
 ![Grafana](https://img.shields.io/badge/Grafana-F46800?style=for-the-badge&logo=grafana&logoColor=white)
 ![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-CI%2FCD-2088FF?style=for-the-badge&logo=githubactions&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-56%20passed%20·%2098%25%20cov-success?style=for-the-badge)
+![Tests](https://img.shields.io/badge/tests-58%20passed%20·%2098%25%20cov-success?style=for-the-badge)
 
 </div>
 
@@ -96,7 +96,7 @@ pipeline CI/CD, retreino orquestrado, monitoramento e latência.
 | Throughput HTTP com 8 clientes | 162 → **205 req/s** (**+26%**) |
 | Tamanho do artefato | 3,26 MB → **2,08 MB** |
 | Overhead do nginx (proxy reverso) | ~0,5 ms no p50 |
-| Testes | 56 testes (52 locais + 4 da DAG no CI), cobertura **98%** |
+| Testes | 58 testes (54 locais + 4 da DAG no CI), cobertura **98%** |
 
 Relatórios completos: [`reports/latency.md`](reports/latency.md) (modelo isolado) e
 [`reports/http_latency.md`](reports/http_latency.md) (API fim a fim).
@@ -154,13 +154,13 @@ Localmente, a mesma stack de serving roda com `docker-compose.yml` (que constró
 | Modelo | TF-IDF (1–2 gramas) + Regressão Logística | Classificador leve, interpretável e rápido |
 | Otimização | `skl2onnx` + ONNX Runtime | Pipeline inteiro (texto → probabilidades) em um grafo ONNX |
 | Serviço | FastAPI + Uvicorn em Docker (multi-stage, não-root) | Inferência real-time |
-| Proxy reverso | nginx | Porta única (80): roteia `/`, `/grafana/`, `/prometheus/`; bloqueia `/metrics` externamente |
+| Proxy reverso | nginx | Porta única (80): roteia `/`, `/grafana/`, `/prometheus/`; bloqueia `/metrics` e `/admin/*` externamente |
 | Métricas | `prometheus_client` (middleware próprio) | Requisições, latência, erros, inferência, classes |
 | Observabilidade | Prometheus + Grafana provisionados | Dashboard com 11 painéis versionado em JSON |
 | Orquestração | Airflow 2.10 (LocalExecutor) | Retreino com quality gate e publicação |
 | Experimentos | MLflow 3 (tracking + Model Registry) | Histórico de cada retreino; alias `champion` = modelo em produção |
 | CI/CD | GitHub Actions | CI: lint → test / dag-check → build + smoke · CD: champion do S3 → ECR → EC2 (SSM) |
-| Infraestrutura | CloudFormation | ECR, S3, OIDC, EC2, agendamento liga/desliga e alerta de orçamento como código |
+| Infraestrutura | CloudFormation | ECR, S3, OIDC, EC2 com IP fixo e alerta de orçamento, tudo como código |
 
 ---
 
@@ -172,151 +172,99 @@ Localmente, a mesma stack de serving roda com `docker-compose.yml` (que constró
 |---|---|---|---|
 | Quando o resultado é necessário | Horas depois | Segundos | **Imediato**: um laudo urgente não pode esperar o próximo job |
 | Volume por requisição | Grandes lotes | 1 laudo por vez | Laudos chegam um a um, ao longo do dia |
-| Custo do modelo | Pesado (GPU) | Leve | **Leve**: < 1 ms por laudo em CPU com ONNX |
+| Peso do modelo | Pesado (GPU) | Leve | **Leve**: < 1 ms por laudo em CPU com ONNX |
 | Consequência de atraso | Baixa | Alta | **Alta**: atraso na triagem = risco clínico |
 
 **Decisão: inferência real-time (online), com treino em batch.** A pergunta clássica de "batch primeiro"
 não se aplica aqui porque o valor do sistema está justamente em **reduzir o tempo até a priorização**.
-O modelo é leve o bastante para que o real-time não custe caro, e o retreino (semanal) é naturalmente
-batch.
+O modelo é leve o bastante para servir em tempo real numa CPU comum, e o retreino (semanal) é
+naturalmente batch.
 
-A arquitetura foi pensada em **duas camadas**: o que este projeto (educacional) implanta de fato, com
-custo mínimo, e como ela evoluiria para a produção real de um hospital.
-
-### Camada 1 — Implementação do projeto: AWS EC2 + Docker Compose + nginx
+### Arquitetura implantada: AWS EC2 + Docker Compose + nginx
 
 ```mermaid
 flowchart LR
-    U[Usuário / sistema do hospital] -->|HTTP :80| SG{{Security Group<br/>só a porta 80}}
+    U[Usuário / sistema do hospital] -->|HTTP :80 · IP fixo| SG{{Security Group<br/>só a porta 80}}
     SG --> NG
-    subgraph EC2["EC2 t3.small · docker-compose.prod.yml"]
+    subgraph EC2["EC2 · docker-compose.prod.yml"]
         NG[nginx] --> API[triage-api<br/>ONNX Runtime]
         NG --> GF[Grafana]
         NG --> PR[Prometheus]
         API --> PR
     end
     ECR[(ECR)] -->|pull com IAM Role| API
+    S3[(S3<br/>modelo champion)] --> CD
     CD[GitHub Actions CD] -->|push imagem · OIDC| ECR
     CD -->|SSM Run Command| EC2
-    SCH[EventBridge Scheduler] -.liga 8h / desliga 20h.-> EC2
 ```
 
-Uma única instância roda a stack de serving com Docker Compose — o padrão já validado no Tech
-Challenge 1. O nginx é a única porta de entrada e cumpre, em escala de um servidor, o papel que um
-load balancer gerenciado teria:
+Uma única instância roda a stack de serving com Docker Compose, com **IP Elástico** (endereço fixo) e
+ligada 24h — o padrão já validado no Tech Challenge 1. O nginx é a única porta de entrada:
 
 | Função | Como o nginx resolve |
 |---|---|
 | Porta única | Tudo entra pela 80; demais portas ficam só na rede interna do Docker |
 | Roteamento por caminho | `/` → API · `/grafana/` → Grafana · `/prometheus/` → Prometheus |
-| Proteção | `/metrics` bloqueado para a internet; limite de 1 MB por requisição; `server_tokens off` |
+| Proteção | `/metrics` e `/admin/*` bloqueados para a internet; limite de 1 MB por requisição; `server_tokens off` |
 | Desempenho | Conexões *keep-alive* com a API (overhead medido: ~0,5 ms no p50) |
 
-**Por que EC2 aqui:** custo baixo e previsível (uma `t3.small` ligada só em horário comercial), nenhum
-serviço gerenciado cobrando por hora e reaproveita o conhecimento do TC1. **Airflow e MLflow não vão para
-a EC2:** são a plataforma de treino, pesada e usada só semanalmente; o modelo aprovado chega à nuvem
-pelo S3, dentro da imagem construída pelo CD.
+**Componentes AWS utilizados** (todos criados por [`infra/cloudformation.yml`](infra/cloudformation.yml)):
 
-**Decisões que mantêm tudo automatizado e seguro sem custo extra:**
-
-| Decisão | Benefício |
+| Serviço | Papel no projeto |
 |---|---|
-| **ECR** como registry | A EC2 baixa a imagem com sua IAM Role — nenhuma senha de registry no servidor |
-| **OIDC** GitHub → AWS | Nenhuma chave de acesso da AWS guardada no GitHub |
-| **SSM Run Command** para o deploy | Sem porta 22 aberta e sem chave SSH; acesso ao shell pelo Session Manager |
-| **Modelo dentro da imagem** (tag `sha-<commit>-model-<versão>`) | Imagem imutável: voltar uma versão é trocar a tag |
-| **CloudFormation** ([`infra/cloudformation.yml`](infra/cloudformation.yml)) | Infra versionada; `make infra-down` apaga tudo e zera o custo |
-| **EventBridge Scheduler** + **AWS Budgets** | A EC2 desliga sozinha à noite; alerta por e-mail se passar do orçamento |
+| **EC2** + Security Group + **IP Elástico** | Servidor da stack de serving; só a porta 80 aberta; endereço fixo |
+| **ECR** | Registry das imagens da API (scan de vulnerabilidades a cada push; mantém as 5 mais recentes) |
+| **S3** | Modelo `champion` aprovado pelo pipeline de treino e pacotes de deploy (versionado e criptografado) |
+| **IAM** (OIDC + roles) | O GitHub Actions entra na AWS por OIDC, sem chave guardada no repositório; a EC2 baixa imagens com a própria role |
+| **SSM Run Command** | Deploy na EC2 sem porta 22 aberta e sem chave SSH |
+| **CloudFormation** | Toda a infraestrutura versionada como código; `make infra-down` remove tudo |
+| **AWS Budgets** | Alerta por e-mail se o gasto mensal passar do limite configurado |
 
-O passo a passo está em [🚀 Deploy na AWS](#-deploy-na-aws).
+**Por que essa arquitetura:**
 
-**Limites assumidos (aceitáveis para o projeto, não para o hospital):** um único servidor (sem alta
-disponibilidade — se a instância cair, a API cai), escala apenas vertical e deploy com alguns segundos
-de indisponibilidade.
+- **Real-time sem cold start:** o container fica sempre carregado, com o modelo em memória e warm-up
+  feito; a primeira requisição do dia responde tão rápido quanto as outras.
+- **Imagem imutável:** cada imagem carrega um modelo fixo (tag `sha-<commit>-model-<versão>`), então
+  voltar uma versão é apontar para a tag anterior.
+- **Treino separado do serving:** Airflow e MLflow ficam na plataforma de MLOps (local), pesada e usada
+  só no retreino semanal; o modelo aprovado chega à nuvem pelo S3, dentro da imagem construída pelo CD.
+- **Simplicidade operacional:** um único `docker-compose.prod.yml`, o mesmo modelo de execução do
+  ambiente local.
 
-### Camada 2 — Evolução para produção no hospital: ECS Fargate + ALB
-
-```mermaid
-flowchart LR
-    HIS[Sistema hospitalar<br/>RIS/PACS/HIS] -->|HTTPS + mTLS| ALB[Application Load Balancer<br/>subnets privadas]
-    ALB --> ECS[ECS Fargate<br/>triage-api · 2+ tasks · autoscaling]
-    ECR[(ECR<br/>imagem versionada)] --> ECS
-    S3[(S3 + KMS<br/>models/ versionado)] --> ECS
-    ECS --> AMP[Amazon Managed<br/>Prometheus] --> AMG[Amazon Managed<br/>Grafana]
-    ECS --> CW[CloudWatch Logs]
-    MWAA[MWAA<br/>Airflow gerenciado] -->|retreino semanal| S3
-    GHA[GitHub Actions<br/>OIDC] -->|push imagem| ECR
-```
-
-| Camada | Serviço | Por quê |
-|---|---|---|
-| Registro de imagem | **Amazon ECR** | Destino natural do CD; scan de vulnerabilidades da imagem |
-| Inferência | **ECS Fargate** atrás de **ALB** | Container sempre quente (sem cold start), sem gerenciar servidores, autoscaling por CPU/RPS, rolling/blue-green deploy |
-| Artefatos | **S3** (versionamento + KMS) | Modelo versionado, rollback trivial, criptografia em repouso |
-| Retreino | **MWAA** (Airflow gerenciado) | Reaproveita a mesma DAG deste repositório sem alterações de lógica |
-| Observabilidade | **Amazon Managed Prometheus + Grafana** | Mesmas métricas e o mesmo dashboard JSON do ambiente local |
-| CI/CD | GitHub Actions com **OIDC** | Sem chaves de longa duração no repositório |
-| Experimentos | MLflow em ECS (ou SageMaker MLflow gerenciado) + RDS + S3 | Mesmo tracking/registry do projeto, com backend durável |
-
-**O ALB substitui o nginx** quando há mais de um servidor: recebe HTTPS (certificado gratuito do ACM),
-distribui as requisições entre as tasks de várias zonas de disponibilidade, consulta o `/health` da API
-e tira de rotação a task que falhar, e só envia tráfego à nova versão depois que ela fica saudável
-(deploy sem downtime). O **ECS Express Mode** cria esse conjunto (serviço Fargate + ALB + HTTPS +
-autoscaling) a partir da imagem do container em um único passo.
-
-**Quando vale pagar por isso:** o ALB custa ~US$ 16–25/mês (hora + capacidade + IPs) e duas tasks
-Fargate de 0,5 vCPU / 1 GB, ~US$ 35/mês. Para o hospital, alta disponibilidade e deploy sem
-indisponibilidade justificam o custo; para o projeto educacional, a Camada 1 entrega o mesmo
-comportamento funcional por uma fração do preço.
+**Limites assumidos:** um único servidor (sem alta disponibilidade — se a instância cair, a API cai),
+escala apenas vertical e deploy com alguns segundos de indisponibilidade. Para um ambiente hospitalar,
+o caminho natural seria levar a mesma imagem para **ECS Fargate atrás de um Application Load Balancer**
+(várias réplicas, autoscaling e deploy sem downtime), sem mudar o código.
 
 **Alternativas avaliadas e descartadas:**
 
-- **AWS Lambda** — viável (o modelo ONNX tem 2 MB), mas o *cold start* de Python + onnxruntime
-  (1–3 s) é inaceitável justamente no laudo urgente que chega de madrugada, com tráfego baixo.
-  Provisioned concurrency resolve, mas com custo similar ao Fargate e mais complexidade.
-- **SageMaker Real-time Endpoint** — ótimo para modelos pesados (GPU, multi-model), mas é
-  superdimensionado e mais caro para um modelo de < 1 ms em CPU.
-- **AWS App Runner** — seria a opção mais simples, mas deixou de aceitar novos clientes em 30/04/2026;
-  a AWS indica o ECS Express Mode como substituto.
-- **Batch (AWS Batch / SageMaker Batch Transform)** — incompatível com o requisito de triagem
-  imediata. Fica como complemento para **reprocessar o histórico** quando um novo modelo é publicado.
-
-**Equivalentes em outras nuvens:** Azure Container Apps + ACR + Azure ML/Data Factory · GCP Cloud Run
-(com `min-instances ≥ 1` para evitar cold start) + Artifact Registry + Cloud Composer.
-
-### FinOps
-
-- **Projeto (Camada 1):** estimativa em us-east-1 (confira na [AWS Pricing Calculator](https://calculator.aws/)):
-
-  | Item | Ligada 24h | Com o agendamento padrão (~60h/semana) |
-  |---|---:|---:|
-  | EC2 `t3.small` | ~US$ 15 | ~US$ 5,40 |
-  | IP público (cobrado só com a instância ligada) | ~US$ 3,60 | ~US$ 1,30 |
-  | EBS 20 GB gp3 (cobrado mesmo desligada) | ~US$ 1,60 | ~US$ 1,60 |
-  | ECR (~1,3 GB; mantém só as 5 últimas imagens) | ~US$ 0,15 | ~US$ 0,15 |
-  | S3, SSM, OIDC, EventBridge, Budgets | ~US$ 0 | ~US$ 0 |
-  | **Total por mês** | **~US$ 20** | **~US$ 8,50** |
-
-  Airflow e MLflow rodam localmente (custo zero) e, dependendo da conta, os créditos de free tier
-  cobrem o período. Após a avaliação, `make infra-down` remove tudo.
-- **Produção (Camada 2):** Fargate com 2 tasks de **0,5 vCPU / 1 GB** atende centenas de req/s (o modelo usa < 1 ms de CPU por laudo).
-  Autoscaling mínimo 2 (alta disponibilidade), máximo conforme o pico.
-- **Fargate Spot** para o ambiente de homologação; Savings Plans para produção.
-- Retreino semanal em MWAA no menor ambiente (`mw1.small`) — ou, para reduzir custo fixo, a mesma
-  DAG pode virar uma *ECS Scheduled Task*.
-- A otimização com ONNX tem efeito direto em custo: **~3,5x mais throughput por vCPU** significa menos tasks
-  para o mesmo volume.
+- **AWS Lambda:** o *cold start* de Python + onnxruntime (1–3 s) prejudica justamente o laudo urgente que
+  chega com tráfego baixo, de madrugada.
+- **SageMaker Real-time Endpoint:** pensado para modelos pesados (GPU, multi-model); superdimensionado para
+  um modelo de < 1 ms em CPU.
+- **ECS Fargate + ALB:** a evolução natural para alta disponibilidade, mas desnecessária para uma API de
+  instância única neste projeto.
+- **Batch (AWS Batch / SageMaker Batch Transform):** incompatível com o requisito de triagem imediata;
+  serviria como complemento para reprocessar o histórico quando um novo modelo é publicado.
 
 ### Segurança e LGPD
 
-Laudos são **dados pessoais sensíveis de saúde** (LGPD, art. 11):
+Laudos são **dados pessoais sensíveis de saúde** (LGPD, art. 11). O que está implementado:
 
-- Serviço em **subnets privadas**, acessível apenas pela rede do hospital (VPN/Direct Connect) e com mTLS.
-- **Criptografia** em trânsito (TLS) e em repouso (KMS em S3, ECR e logs).
 - A API **não persiste o texto dos laudos** e não registra conteúdo nos logs — só métricas agregadas.
-- IAM com privilégio mínimo (task role com leitura apenas do bucket de modelos), segredos no Secrets Manager.
-- Dados de treino anonimizados; trilha de auditoria (CloudTrail) e `metadata.json` com hash do dataset de
-  cada modelo publicado.
+- **Superfície mínima:** só a porta 80 exposta; endpoints internos (`/metrics`, `/admin/*`) bloqueados no
+  nginx; nenhuma porta SSH aberta (acesso administrativo pelo SSM Session Manager).
+- **Sem credenciais estáticas:** o CI/CD usa OIDC; a EC2 usa IAM Role; a senha do Grafana é gerada na
+  própria instância.
+- **Privilégio mínimo:** a role do CD só envia imagens ao ECR, lê/grava no bucket e faz deploy naquela
+  instância; a role da EC2 só lê imagens e os pacotes de deploy.
+- **Criptografia em repouso:** S3 e disco da EC2 criptografados; container rodando com usuário não-root e
+  código somente leitura.
+- **Rastreabilidade:** `metadata.json` e MLflow registram a versão, as métricas e o hash do dataset de cada
+  modelo publicado.
+
+> A demo usa HTTP (sem domínio próprio). Em um ambiente real, o tráfego seria HTTPS e restrito à rede do
+> hospital (VPN/Direct Connect).
 
 ---
 
@@ -470,8 +418,8 @@ e voltar ao original sem novo build.
 | `POST` | `/predict` | Classifica um laudo |
 | `POST` | `/predict/batch` | Classifica até 256 laudos em uma chamada |
 | `GET` | `/health` | Liveness/readiness: modelo carregado, backend e versão |
-| `POST` | `/admin/reload` | Recarrega o modelo do disco (usado pela DAG após publicar) |
-| `GET` | `/metrics` | Métricas no formato Prometheus |
+| `POST` | `/admin/reload` | Recarrega o modelo do disco (usado pela DAG após publicar; bloqueado no nginx, só acesso interno) |
+| `GET` | `/metrics` | Métricas no formato Prometheus (bloqueado no nginx, coletado pela rede interna) |
 
 ```bash
 curl -X POST http://127.0.0.1/predict \
@@ -497,7 +445,7 @@ Validação: texto vazio, sem palavras ou acima de `MAX_TEXT_LENGTH` → `422`; 
 
 ## 📊 Monitoramento
 
-`docker compose up` sobe **API + Prometheus + Grafana** (atrás do nginx, com MLflow ao lado) com datasource
+`docker compose up` sobe **API + Prometheus + Grafana** (atrás do nginx) com datasource
 e dashboard **provisionados como código** — nenhum clique manual. Grafana em http://localhost/grafana/.
 
 **Métricas expostas** ([`src/api/metrics.py`](src/api/metrics.py)):
@@ -563,7 +511,7 @@ CD  (CI ok · modelo novo do Airflow · tag v* · manual)           ▼
 | Job | O que faz |
 |---|---|
 | **build** | Login na AWS via **OIDC** → baixa o modelo **`champion` do S3** (o aprovado pelo Airflow; se ainda não existir, treina) → constrói a imagem → smoke test → push no **ECR** com as tags `sha-<commit>-model-<versão>`, `sha-<commit>` e `latest` |
-| **deploy** | Liga a EC2 se o agendamento a desligou → envia o *bundle* (compose de produção + nginx + monitoramento) ao S3 → executa [`scripts/ec2_deploy.sh`](scripts/ec2_deploy.sh) na instância via **SSM** → smoke test pela URL pública, publicada no *Job Summary* e no environment `production` |
+| **deploy** | Liga a EC2 se estiver parada → envia o *bundle* (compose de produção + nginx + monitoramento) ao S3 → executa [`scripts/ec2_deploy.sh`](scripts/ec2_deploy.sh) na instância via **SSM** → smoke test pela URL pública, publicada no *Job Summary* e no environment `production` |
 
 **Sem as variáveis de AWS no repositório**, o CD continua útil: treina, constrói e publica a imagem no
 GitHub Container Registry, e o job de deploy é pulado — o projeto funciona antes e depois de a
@@ -650,18 +598,22 @@ exatamente qual versão está em produção.
 
 ## 🚀 Deploy na AWS
 
-Tudo é criado por código e pode ser apagado com um comando. A arquitetura e os custos estão na
-[Camada 1](#️-decisão-de-arquitetura-em-nuvem).
+Tudo é criado por código e pode ser apagado com um comando. A arquitetura está em
+[☁️ Decisão de arquitetura em nuvem](#️-decisão-de-arquitetura-em-nuvem).
 
 **Pré-requisitos:** conta AWS, [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
 configurado (`aws configure`) com um usuário que possa criar recursos IAM, e o repositório no GitHub
 (o [`gh`](https://cli.github.com/) facilita o passo 2).
 
-**1. Criar a infraestrutura** (ECR, S3, role OIDC, EC2, agendamento e orçamento):
+**1. Criar a infraestrutura** (ECR, S3, role OIDC, EC2 com IP fixo e alerta de orçamento):
 
 ```bash
-make infra-up GITHUB_REPO=<dono>/<repositorio> BUDGET_EMAIL=<seu-email>
+make infra-up GITHUB_REPO=<dono>/<repositorio> BUDGET_EMAIL=<seu-email> ELASTIC_IP=true SCHEDULE=false
 ```
+
+> `ELASTIC_IP=true SCHEDULE=false` é a configuração da demo: endereço fixo e instância ligada 24h. Sem
+> esses parâmetros, o template não reserva IP fixo e liga/desliga a instância em horário comercial
+> (EventBridge Scheduler), para ambientes de teste.
 
 > Se a conta já tiver o provedor OIDC do GitHub (`token.actions.githubusercontent.com`), adicione
 > `CreateGitHubOidcProvider=false` aos parâmetros. Confirme a inscrição no e-mail do AWS Budgets.
@@ -703,26 +655,16 @@ imagem na EC2 — **sem nenhum passo manual**.
 
 **Operação:**
 
-- **Horário:** a instância liga às 8h (seg–sex) e desliga às 20h (horário de Brasília). O CD a liga se
-  precisar fazer um deploy fora do horário. Ajuste em `StartCron` / `StopCron` ou desative com
-  `EnableSchedule=false`. O IP público muda a cada religamento: o CD sempre mostra o atual.
+- **Disponibilidade:** com `ELASTIC_IP=true SCHEDULE=false`, a instância fica ligada 24h com endereço fixo
+  (é a configuração da demo). Se o agendamento estiver ativo, o CD liga a instância para fazer um deploy
+  fora do horário.
 - **Shell na instância** (sem SSH): console EC2 → *Connect* → *Session Manager*, ou
   `aws ssm start-session --target <InstanceId>`.
 - **Senha do admin do Grafana:** gerada na instância, em `sudo cat /opt/triage/.grafana_password`.
 - **Rollback:** pela sessão SSM, aponte para uma tag anterior do ECR:
   `cd /opt/triage && sudo API_IMAGE=<ecr>:<tag-anterior> AWS_REGION=us-east-1 BUNDLE_URI=s3://<bucket>/deploy/<sha>/ bash ec2_deploy.sh`.
 
-**Período de avaliação (endereço fixo, 24h):** por padrão a EC2 desliga à noite e o IP muda a cada
-religamento. Enquanto o projeto estiver sendo avaliado, deixe o endereço fixo (IP Elástico) e a
-instância sempre ligada (~US$ 20/mês em vez de ~US$ 8,50):
-
-```bash
-make infra-up GITHUB_REPO=<dono>/<repositorio> BUDGET_EMAIL=<email> ELASTIC_IP=true SCHEDULE=false
-```
-
-Depois da avaliação, volte ao modo econômico (`ELASTIC_IP=false SCHEDULE=true`) ou apague tudo.
-
-**5. Apagar tudo (custo zero):**
+**5. Apagar tudo:**
 
 ```bash
 make infra-down   # esvazia o bucket (todas as versões) e remove o stack inteiro
@@ -760,7 +702,7 @@ O Airflow lê as variáveis de nuvem de `orchestration/.env` ([exemplo](orchestr
 ├── .github/workflows/
 │   ├── ci.yml                    # CI: lint → test/dag-check → build + smoke test
 │   └── cd.yml                    # CD: champion do S3 → ECR → deploy na EC2 (SSM)
-├── infra/cloudformation.yml      # infraestrutura AWS como código (ECR, S3, OIDC, EC2, custos)
+├── infra/cloudformation.yml      # infraestrutura AWS como código (ECR, S3, OIDC, EC2, IP fixo)
 ├── dags/triage_training_dag.py   # DAG Airflow de retreino (12 tasks, com branch champion × challenger)
 ├── orchestration/                # plataforma de MLOps local: Airflow + MLflow (compose, Dockerfile)
 ├── nginx/nginx.conf              # proxy reverso: /, /grafana/, /prometheus/
@@ -781,7 +723,7 @@ O Airflow lê as variáveis de nuvem de `orchestration/.env` ([exemplo](orchestr
 │   ├── load_test.py              # carga HTTP fim a fim / tráfego para o Grafana
 │   ├── ec2_deploy.sh             # roda na EC2 (via SSM): pull do ECR + compose up + health check
 │   └── empty_bucket.py           # esvazia o bucket versionado antes de apagar o stack
-├── tests/                        # 56 testes, fixtures offline
+├── tests/                        # 58 testes, fixtures offline
 ├── reports/                      # resultados de latência (md + json)
 ├── docs/                         # model card e prints
 ├── Dockerfile                    # multi-stage (uv), usuário não-root, healthcheck
@@ -805,7 +747,8 @@ O Airflow lê as variáveis de nuvem de `orchestration/.env` ([exemplo](orchestr
 | Otimização de performance vista em aula | ONNX Runtime — **3,6x** mais rápido no modelo, F1 idêntico | ✅ |
 | Comparação de latência original × otimizado | [`reports/latency.md`](reports/latency.md), [`reports/http_latency.md`](reports/http_latency.md) | ✅ |
 | Baseline de latência local em Docker | [`reports/http_latency.md`](reports/http_latency.md) | ✅ |
-| Decisão arquitetural em nuvem (batch × real-time) | [Seção acima](#️-decisão-de-arquitetura-em-nuvem) — EC2 + nginx (projeto) e ECS + ALB (produção) | ✅ |
+| Decisão arquitetural em nuvem (batch × real-time) | [Seção acima](#️-decisão-de-arquitetura-em-nuvem) — real-time em EC2 + nginx | ✅ |
+| Deploy em nuvem funcionando | [🌐 Demo online](#-demo-online) — implantado pelo CD na AWS | ✅ |
 | Extra: rastreamento de experimentos e registry | MLflow com alias `champion` ([seção](#-rastreamento-de-experimentos-mlflow)) | ✅ |
 | Extra: proxy reverso | [`nginx/nginx.conf`](nginx/nginx.conf) | ✅ |
 | Extra: infraestrutura como código e deploy automatizado | [`infra/cloudformation.yml`](infra/cloudformation.yml) + CD (OIDC, ECR, SSM) — [passo a passo](#-deploy-na-aws) | ✅ |
