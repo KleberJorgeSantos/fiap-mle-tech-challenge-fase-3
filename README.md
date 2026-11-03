@@ -60,7 +60,9 @@ A stack de produção está implantada na AWS (EC2 + nginx, endereço fixo, 24h)
 | Prometheus | http://3.222.236.70/prometheus/ |
 
 ```bash
-curl -X POST http://3.222.236.70/predict   -H "Content-Type: application/json"   -d '{"text": "Colon adenocarcinoma with liver metastasis, chemotherapy planned."}'
+curl -X POST http://3.222.236.70/predict \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Colon adenocarcinoma with liver metastasis, chemotherapy planned."}'
 ```
 
 > Ambiente acadêmico mantido no ar durante o período de avaliação. Os textos de exemplo devem estar em
