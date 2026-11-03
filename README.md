@@ -766,10 +766,12 @@ O Airflow lê as variáveis de nuvem de `orchestration/.env` ([exemplo](orchestr
 | Bibliotecas: Scikit-Learn, FastAPI, prometheus-client, Airflow | `pyproject.toml`, `orchestration/` | ✅ |
 | Dataset com ≥ 2.000 amostras | 11.227 laudos (Medical Abstracts TC Corpus) | ✅ |
 | Histórico de commits semântico | Conventional Commits (`feat`, `fix`, `perf`, `ci`, `docs`…) | ✅ |
-| Vídeo STAR (≤ 5 min) | [Link abaixo](#-vídeo) | 🎬 |
+| Vídeo STAR (≤ 5 min) | [YouTube](https://youtu.be/bx-z0L7kjDM) | ✅ |
 
 ---
 
 ## 🎬 Vídeo
 
-📺 **[Link do vídeo de demonstração (STAR, 5 min)](#)** — _a ser adicionado_
+📺 **[Vídeo de demonstração (STAR, ≤ 5 min)](https://youtu.be/bx-z0L7kjDM)**
+
+[![Vídeo de demonstração](https://img.youtube.com/vi/bx-z0L7kjDM/hqdefault.jpg)](https://youtu.be/bx-z0L7kjDM)
