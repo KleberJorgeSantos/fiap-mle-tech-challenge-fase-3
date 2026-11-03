@@ -122,8 +122,16 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              # GitHub issues the subject either as repo:<owner>/<repo>:<ref> or, with
+              # immutable IDs, as repo:<owner>@<owner-id>/<repo>@<repo-id>:<ref>. Accept both,
+              # always pinned to this owner and repository name.
               StringLike:
-                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubRepository}:*
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubRepository}:*
+                  - !Sub
+                    - repo:${Owner}@*/${Repo}@*:*
+                    - Owner: !Select [0, !Split ["/", !Ref GitHubRepository]]
+                      Repo: !Select [1, !Split ["/", !Ref GitHubRepository]]
       Policies:
         - PolicyName: triage-cd
           PolicyDocument:
